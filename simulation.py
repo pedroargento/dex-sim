@@ -1,11 +1,14 @@
 import json
+from typing import Optional
+
 import numpy as np
-import matplotlib.pyplot as plt
 from scipy.stats import t
+
+from data_structures import SimulationResults
 
 
 # ============================================================
-# ETH-Calibrated Monte Carlo Returns Generator
+# Monte Carlo returns generator (ETH-calibrated GARCH-ish)
 # ============================================================
 
 
@@ -39,7 +42,7 @@ class MCReturnsGenerator:
         # Daily → minute volatility scaling
         self.TIME_SCALE = np.sqrt(1.0 / 1440.0)
 
-    def generate_paths(self, num_paths: int | None = None):
+    def generate_paths(self, num_paths: Optional[int] = None):
         if num_paths is None:
             num_paths = self.num_paths
 
@@ -117,7 +120,7 @@ class RiskEngine:
 # ============================================================
 
 
-def run_two_trader_aes_vs_fxd_df_required(
+def run_simulation(
     num_paths: int = 10_000,
     initial_price: float = 4000.0,
     total_oi: float = 1_000_000_000.0,
@@ -127,7 +130,8 @@ def run_two_trader_aes_vs_fxd_df_required(
     stress_factor: float = 1.0,
     slippage_factor: float = 0.001,  # 0.1% of notional extra loss on close-out
     num_sample_paths: int = 5,
-):
+    garch_params_file: str = "garch_params.json",
+) -> SimulationResults:
     """
     2-trader model (one long, one short) evaluated under:
       - AES regime: vol-based IM (ES * sigma * notional)
@@ -158,7 +162,13 @@ def run_two_trader_aes_vs_fxd_df_required(
       - price path.
     """
 
-    mc = MCReturnsGenerator(num_paths=num_paths, stress_factor=stress_factor)
+    # --- Setup generators and risk engine ---
+    mc = MCReturnsGenerator(
+        garch_params_file=garch_params_file,
+        num_paths=num_paths,
+        horizon=7_200,
+        stress_factor=stress_factor,
+    )
     risk = RiskEngine()
     log_returns, amihud_le = mc.generate_paths(num_paths)
     horizon = mc.horizon
@@ -427,7 +437,6 @@ def run_two_trader_aes_vs_fxd_df_required(
                     fxd_eq_short[full_idx_nd] += vm_full
 
         # ---- Sample-path metrics (price, leverage, R_t, breaker) ----
-        # Price paths for sample indices
         sample_logret = log_returns[sample_idx, t]
         price_paths[:, t] = price_paths[:, t - 1] * np.exp(sample_logret)
 
@@ -490,180 +499,25 @@ def run_two_trader_aes_vs_fxd_df_required(
     mask_fxd = fxd_vm_theoretical > 0
     fxd_haircut[mask_fxd] = 1.0 - (fxd_vm_paid[mask_fxd] / fxd_vm_theoretical[mask_fxd])
 
-    return {
-        "aes": {
-            "df_required": aes_df_required,  # DF $ needed if starting from 0
-            "default_rate": np.mean(aes_default),
-            "df_exhaust_rate": np.mean(aes_df_exhausted),
-            "haircut_fraction": aes_haircut,
-        },
-        "fxd": {
-            "df_required": fxd_df_required,
-            "default_rate": np.mean(fxd_default),
-            "df_exhaust_rate": np.mean(fxd_df_exhausted),
-            "haircut_fraction": fxd_haircut,
-        },
-        "samples": {
-            "idx": sample_idx,
-            "price_paths": price_paths,
-            "leverage_long_aes": leverage_long_aes,
-            "leverage_short_aes": leverage_short_aes,
-            "leverage_long_fxd": leverage_long_fxd,
-            "leverage_short_fxd": leverage_short_fxd,
-            "R_aes": R_aes,
-            "R_fxd": R_fxd,
-            "breaker_aes": breaker_aes,
-            "breaker_fxd": breaker_fxd,
-        },
-    }
-
-
-# ============================================================
-# Analysis & Plotting for AES vs FXD
-# ============================================================
-
-
-def analyze_aes_vs_fxd_df_required(results):
-    aes = results["aes"]
-    fxd = results["fxd"]
-    samples = results["samples"]
-
-    def summarize(name, r):
-        df_req = r["df_required"]
-        haircut = r["haircut_fraction"]
-        default_rate = r["default_rate"]
-        df_exhaust_rate = r["df_exhaust_rate"]
-
-        print(f"\n--- {name} regime ---")
-        print(f"Path default rate (any VM shortfall): {default_rate:.2%}")
-        print(f"Paths with any DF exhaustion (finite DF view): {df_exhaust_rate:.2%}")
-
-        print(f"DF required ($) mean:                 {np.mean(df_req):,.0f}")
-        print(f"DF required ($) 95th pct:             {np.percentile(df_req, 95):,.0f}")
-        print(f"DF required ($) 99th pct:             {np.percentile(df_req, 99):,.0f}")
-
-        if np.any(haircut > 0):
-            nonzero = haircut[haircut > 0]
-            print(
-                f"Median haircut (paths w/ VM):        {np.percentile(nonzero, 50):.2%}"
-            )
-            print(
-                f"95th pct haircut:                    {np.percentile(nonzero, 95):.2%}"
-            )
-        else:
-            print("No haircuts observed (all VM fully paid given finite DF_init).")
-
-    print("\n=== 2-Trader AES vs FXD (DF requirement, VM-default + slippage) ===")
-    summarize("AES", aes)
-    summarize("FXD", fxd)
-
-    # Plot DF required distribution
-    aes_df_req = aes["df_required"]
-    fxd_df_req = fxd["df_required"]
-
-    plt.figure(figsize=(10, 6))
-    plt.hist(aes_df_req, bins=50, alpha=0.7, label="AES DF required")
-    plt.hist(fxd_df_req, bins=50, alpha=0.7, label="FXD DF required")
-    plt.xlabel("DF Required per Path (USD)")
-    plt.ylabel("Frequency")
-    plt.title("Default Fund Requirement Distribution: AES vs FXD")
-    plt.legend()
-    plt.grid(True)
-    plt.savefig("two_trader_aes_fxd_df_required.png")
-    print("Saved two_trader_aes_fxd_df_required.png")
-
-    # Haircut distributions (if any)
-    aes_hc = aes["haircut_fraction"]
-    fxd_hc = fxd["haircut_fraction"]
-
-    if np.any(aes_hc > 0) or np.any(fxd_hc > 0):
-        plt.figure(figsize=(10, 6))
-        if np.any(aes_hc > 0):
-            plt.hist(aes_hc[aes_hc > 0], bins=50, alpha=0.7, label="AES haircuts")
-        if np.any(fxd_hc > 0):
-            plt.hist(fxd_hc[fxd_hc > 0], bins=50, alpha=0.7, label="FXD haircuts")
-        plt.xlabel("Haircut Fraction (1 - paid_VM / theoretical_VM)")
-        plt.ylabel("Frequency")
-        plt.title("Winner Haircut Distribution: AES vs FXD")
-        plt.legend()
-        plt.grid(True)
-        plt.savefig("two_trader_aes_fxd_haircuts.png")
-        print("Saved two_trader_aes_fxd_haircuts.png")
-
-    # ---- Time-series plots for sample paths ----
-    price_paths = samples["price_paths"]
-    lev_la = samples["leverage_long_aes"]
-    lev_sa = samples["leverage_short_aes"]
-    lev_lf = samples["leverage_long_fxd"]
-    lev_sf = samples["leverage_short_fxd"]
-    R_aes = samples["R_aes"]
-    R_fxd = samples["R_fxd"]
-    br_aes = samples["breaker_aes"]
-    br_fxd = samples["breaker_fxd"]
-
-    num_sample_paths, horizon = price_paths.shape
-    max_plots = min(num_sample_paths, 5)
-
-    for k in range(max_plots):
-        t_axis = np.arange(horizon)
-
-        # Price path
-        plt.figure(figsize=(10, 4))
-        plt.plot(t_axis, price_paths[k])
-        plt.xlabel("Time step")
-        plt.ylabel("Price")
-        plt.title(f"Sample path {k} - Price")
-        plt.grid(True)
-        plt.savefig(f"sample_{k}_price.png")
-
-        # Leverage (long side)
-        plt.figure(figsize=(10, 4))
-        plt.plot(t_axis, lev_la[k], label="AES long")
-        plt.plot(t_axis, lev_lf[k], label="FXD long")
-        plt.xlabel("Time step")
-        plt.ylabel("Leverage (long)")
-        plt.title(f"Sample path {k} - Long Leverage AES vs FXD")
-        plt.legend()
-        plt.grid(True)
-        plt.savefig(f"sample_{k}_leverage_long.png")
-
-        # Risk factor R_t
-        plt.figure(figsize=(10, 4))
-        plt.plot(t_axis, R_aes[k], label="AES R_t")
-        plt.plot(t_axis, R_fxd[k], label="FXD R_t")
-        plt.xlabel("Time step")
-        plt.ylabel("R_t")
-        plt.title(f"Sample path {k} - Systemic Risk Factor R_t")
-        plt.legend()
-        plt.grid(True)
-        plt.savefig(f"sample_{k}_Rt.png")
-
-        # Breaker state (step plot)
-        plt.figure(figsize=(10, 4))
-        plt.step(t_axis, br_aes[k], where="post", label="AES breaker")
-        plt.step(t_axis, br_fxd[k], where="post", label="FXD breaker")
-        plt.yticks([0, 1, 2], ["NORMAL", "SOFT", "HARD"])
-        plt.xlabel("Time step")
-        plt.ylabel("Breaker State")
-        plt.title(f"Sample path {k} - Breaker State AES vs FXD")
-        plt.legend()
-        plt.grid(True)
-        plt.savefig(f"sample_{k}_breaker.png")
-
-    print(f"Saved time-series plots for {max_plots} sample paths.")
-
-
-# ============================================================
-# Main Entrypoint
-# ============================================================
-
-if __name__ == "__main__":
-    results = run_two_trader_aes_vs_fxd_df_required(
-        num_paths=10_000,
-        fxd_leverage=20.0,  # FXD fixed leverage
-        stress_factor=1.0,  # raise to 1.5–2.0 for more stress
-        slippage_factor=0.001,  # 0.1% notional loss when closing a defaulter
-        initial_default_fund=50_000_000.0,  # for finite-DF haircut view
-        num_sample_paths=5,
+    return SimulationResults(
+        aes_df_required=aes_df_required,
+        aes_defaults=aes_default,
+        aes_df_exhausted=aes_df_exhausted,
+        aes_haircuts=aes_haircut,
+        fxd_df_required=fxd_df_required,
+        fxd_defaults=fxd_default,
+        fxd_df_exhausted=fxd_df_exhausted,
+        fxd_haircuts=fxd_haircut,
+        sample_idx=sample_idx,
+        price_paths=price_paths,
+        leverage_long_aes=leverage_long_aes,
+        leverage_short_aes=leverage_short_aes,
+        leverage_long_fxd=leverage_long_fxd,
+        leverage_short_fxd=leverage_short_fxd,
+        R_aes=R_aes,
+        R_fxd=R_fxd,
+        breaker_aes=breaker_aes,
+        breaker_fxd=breaker_fxd,
+        horizon=horizon,
+        initial_price=initial_price,
     )
-    analyze_aes_vs_fxd_df_required(results)

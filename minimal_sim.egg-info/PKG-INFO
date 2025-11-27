@@ -1,0 +1,14 @@
+Metadata-Version: 2.4
+Name: minimal-sim
+Version: 0.1.0
+Summary: A minimalistic deterministic simulation for leverage, margin, and CCP logic
+Author: Pedro Argento
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: pandas>=2.0
+Requires-Dist: numpy>=1.24
+Requires-Dist: arch==8.0.0
+Requires-Dist: statsmodels>=0.13.0
+Requires-Dist: scipy>=1.8
+Requires-Dist: matplotlib>=3.7
+Provides-Extra: plot

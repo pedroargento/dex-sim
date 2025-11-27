@@ -1,0 +1,6 @@
+pyproject.toml
+minimal_sim.egg-info/PKG-INFO
+minimal_sim.egg-info/SOURCES.txt
+minimal_sim.egg-info/dependency_links.txt
+minimal_sim.egg-info/requires.txt
+minimal_sim.egg-info/top_level.txt

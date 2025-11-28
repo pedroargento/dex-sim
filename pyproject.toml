@@ -13,6 +13,7 @@ dependencies = [
     "statsmodels>=0.13.0",
     "scipy>=1.8",
     "matplotlib>=3.7",
+    "seaborn>=0.13.2",
 ]
 
 [project.optional-dependencies]

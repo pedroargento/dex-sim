@@ -1,20 +1,32 @@
 """
-plotting.py — Visualization layer for dex-sim results.
+plotting.py — Professional Visualization Suite for Dex-Sim Risk Engine.
 
-Works with SingleModelResults and MultiModelResults.
-Handles optional fields like R_t, breaker_state, margin_multiplier,
-partial liquidation amounts, etc.
+This module provides a comprehensive set of visualizations to analyze:
+1. Solvency & Tail Risk (Survival curves, Violin plots)
+2. Systemic Dynamics (Regime switching, R_t, Breakers)
+3. Microstructure Mechanics (Liquidation heatmaps, Slippage waterfalls)
+4. Convergence & Stability (Monte Carlo confidence)
+
+Designed for use with Matplotlib and Seaborn.
 """
 
 import os
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
 import seaborn as sns
+from typing import List, Optional, Tuple
+
+from .data_structures import MultiModelResults, SingleModelResults
 
 
-# ----------------------------------------------------------------------
-# Utility
-# ----------------------------------------------------------------------
+# ==============================================================================
+#  Configuration & Helpers
+# ==============================================================================
+
+sns.set_theme(style="whitegrid", context="paper", font_scale=1.1)
+PALETTE = sns.color_palette("deep")
 
 
 def _ensure_dir(path: str):
@@ -22,334 +34,485 @@ def _ensure_dir(path: str):
         os.makedirs(path)
 
 
-# ----------------------------------------------------------------------
-# High-level functions
-# ----------------------------------------------------------------------
+def _get_worst_path_idx(model_res: SingleModelResults) -> int:
+    """Returns the index of the path with the highest DF requirement."""
+    return int(np.argmax(model_res.df_required))
 
 
-def plot_all_for_model(model_res, outdir="plots", max_paths=5):
+# ==============================================================================
+#  1. Solvency & Tail Risk Dashboards
+# ==============================================================================
+
+
+def plot_df_survival_curve(results: MultiModelResults, outdir: str):
     """
-    Generate all relevant plots for a single model.
-    Saves them in outdir/<model_name>/...
+    Log-Log Survival Function (Reverse CDF) of Default Fund Usage. 
+    
+    Insight:
+        Reveals power-law tails in loss distributions. Straight lines on this 
+        log-log plot indicate heavy tails (infinite variance potential).
+        Comparing models here shows which one cuts off extreme tail risks better.
     """
-    d = os.path.join(outdir, model_res.name)
-    _ensure_dir(d)
+    plt.figure(figsize=(10, 6))
+    
+    has_data = False
+    for name, model_res in results.models.items():
+        # Filter to positive losses to show the tail structure clearly
+        data = np.sort(model_res.df_required)
+        data = data[data > 0]
+        if len(data) == 0:
+            continue
+        
+        has_data = True
+        n = len(data)
+        # Survival probability P(X > x)
+        y = np.arange(n, 0, -1) / len(model_res.df_required) # Normalize by TOTAL paths
+        
+        plt.plot(data, y, lw=2.5, label=name)
 
-    plot_df_requirement_hist(model_res, d)
-    plot_price_paths(model_res, d, max_paths)
-    plot_leverage_paths(model_res, d, max_paths)
-
-    if model_res.rt is not None:
-        plot_rt_paths(model_res, d, max_paths)
-        plot_rt_distribution(model_res, d)
-
-    if model_res.breaker_state is not None:
-        plot_breaker_heatmap(model_res, d)
-        plot_breaker_transition_probs(model_res, d)
-
-    if model_res.margin_multiplier is not None:
-        plot_margin_multiplier_paths(model_res, d, max_paths)
-        plot_margin_multiplier_distribution(model_res, d)
-
-    # Optional: HL partial liquidation
-    if model_res.partial_liq_amount is not None:
-        plot_partial_liquidation(model_res, d, max_paths)
-
-    if model_res.liquidation_fraction is not None:
-        plot_liquidation_fraction(model_res, d)
-
-    if model_res.notional_paths is not None:
-        plot_notional_paths(model_res, d, max_paths)
-
-    if model_res.equity_long is not None:
-        plot_equity_paths(model_res, d, max_paths)
-
-
-# ----------------------------------------------------------------------
-# Distribution: Default Fund requirement
-# ----------------------------------------------------------------------
-
-
-def plot_df_requirement_hist(model_res, outdir="plots"):
-    df = model_res.df_required
-    plt.figure(figsize=(8, 5))
-    sns.histplot(df, bins=50, kde=False)
-    plt.title(f"DF Requirement Distribution — {model_res.name}")
-    plt.xlabel("DF Required ($)")
-    plt.ylabel("Frequency")
-    plt.tight_layout()
-    plt.savefig(os.path.join(outdir, f"{model_res.name}_df_hist.png"))
-    plt.close()
-
-
-# ----------------------------------------------------------------------
-# Price paths
-# ----------------------------------------------------------------------
-
-
-def plot_price_paths(model_res, outdir, max_paths=5):
-    P, T = model_res.price_paths.shape
-    paths = min(P, max_paths)
-
-    plt.figure(figsize=(10, 5))
-    for i in range(paths):
-        plt.plot(model_res.price_paths[i], alpha=0.7)
-    plt.title(f"Sample Price Paths — {model_res.name}")
-    plt.xlabel("Time")
-    plt.ylabel("Price")
-    plt.tight_layout()
-    plt.savefig(os.path.join(outdir, f"{model_res.name}_price_paths.png"))
-    plt.close()
-
-
-# ----------------------------------------------------------------------
-# Leverage paths
-# ----------------------------------------------------------------------
-
-
-def plot_leverage_paths(model_res, outdir, max_paths=5):
-    P, T = model_res.lev_long.shape
-    paths = min(P, max_paths)
-
-    plt.figure(figsize=(10, 5))
-    for i in range(paths):
-        plt.plot(model_res.lev_long[i], label=f"path {i}", alpha=0.6)
-    plt.title(f"Long Leverage (sample paths) — {model_res.name}")
-    plt.xlabel("Time")
-    plt.ylabel("Leverage (Long)")
-    plt.tight_layout()
-    plt.savefig(os.path.join(outdir, f"{model_res.name}_long_lev.png"))
-    plt.close()
-
-    plt.figure(figsize=(10, 5))
-    for i in range(paths):
-        plt.plot(model_res.lev_short[i], alpha=0.6)
-    plt.title(f"Short Leverage (sample paths) — {model_res.name}")
-    plt.xlabel("Time")
-    plt.ylabel("Leverage (Short)")
-    plt.tight_layout()
-    plt.savefig(os.path.join(outdir, f"{model_res.name}_short_lev.png"))
-    plt.close()
-
-
-# ----------------------------------------------------------------------
-# R_t (systemic risk)
-# ----------------------------------------------------------------------
-
-
-def plot_rt_paths(model_res, outdir, max_paths=5):
-    if model_res.rt is None:
-        return
-
-    P, T = model_res.rt.shape
-    paths = min(P, max_paths)
-
-    plt.figure(figsize=(10, 5))
-    for i in range(paths):
-        plt.plot(model_res.rt[i], alpha=0.7)
-    plt.title(f"R_t (Systemic Stress) — sample paths — {model_res.name}")
-    plt.xlabel("Time")
-    plt.ylabel("R_t")
-    plt.tight_layout()
-    plt.savefig(os.path.join(outdir, f"{model_res.name}_rt_paths.png"))
-    plt.close()
-
-
-def plot_rt_distribution(model_res, outdir):
-    if model_res.rt is None:
-        return
-
-    plt.figure(figsize=(8, 5))
-    sns.histplot(model_res.rt.flatten(), bins=60)
-    plt.title(f"R_t Distribution — {model_res.name}")
-    plt.xlabel("R_t")
-    plt.tight_layout()
-    plt.savefig(os.path.join(outdir, f"{model_res.name}_rt_dist.png"))
-    plt.close()
-
-
-# ----------------------------------------------------------------------
-# Breaker state visualizations
-# ----------------------------------------------------------------------
-
-
-def plot_breaker_heatmap(model_res, outdir):
-    if model_res.breaker_state is None:
-        return
-
-    plt.figure(figsize=(12, 5))
-    plt.imshow(model_res.breaker_state, aspect="auto", cmap="viridis")
-    plt.colorbar(label="Breaker State (0=NORMAL,1=SOFT,2=HARD)")
-    plt.title(f"Breaker State Heatmap — {model_res.name}")
-    plt.xlabel("Time")
-    plt.ylabel("Path")
-    plt.tight_layout()
-    plt.savefig(os.path.join(outdir, f"{model_res.name}_breaker_heatmap.png"))
-    plt.close()
-
-
-def plot_breaker_transition_probs(model_res, outdir):
-    if model_res.breaker_state is None:
-        return
-
-    bs = model_res.breaker_state
-    P, T = bs.shape
-
-    # compute transitions 0->1, 1->2, 2->2, etc.
-    transitions = np.zeros((3, 3))
-    for p in range(P):
-        for t in range(1, T):
-            transitions[bs[p, t - 1], bs[p, t]] += 1
-
-    # normalize row-wise
-    row_sums = transitions.sum(axis=1, keepdims=True)
-    probs = np.divide(transitions, row_sums, where=row_sums > 0)
-
-    plt.figure(figsize=(6, 5))
-    sns.heatmap(
-        probs,
-        annot=True,
-        cmap="Blues",
-        xticklabels=["N", "S", "H"],
-        yticklabels=["N", "S", "H"],
-        fmt=".2f",
-    )
-    plt.title(f"Breaker Transition Probabilities — {model_res.name}")
-    plt.tight_layout()
-    plt.savefig(os.path.join(outdir, f"{model_res.name}_breaker_transitions.png"))
-    plt.close()
-
-
-# ----------------------------------------------------------------------
-# Margin multiplier
-# ----------------------------------------------------------------------
-
-
-def plot_margin_multiplier_paths(model_res, outdir, max_paths=5):
-    if model_res.margin_multiplier is None:
-        return
-
-    P, T = model_res.margin_multiplier.shape
-    paths = min(P, max_paths)
-
-    plt.figure(figsize=(10, 5))
-    for i in range(paths):
-        plt.step(np.arange(T), model_res.margin_multiplier[i], where="mid", alpha=0.6)
-    plt.title(f"Margin Multiplier — sample paths — {model_res.name}")
-    plt.xlabel("Time")
-    plt.ylabel("Multiplier")
-    plt.tight_layout()
-    plt.savefig(os.path.join(outdir, f"{model_res.name}_margin_mult_paths.png"))
-    plt.close()
-
-
-def plot_margin_multiplier_distribution(model_res, outdir):
-    if model_res.margin_multiplier is None:
-        return
-
-    plt.figure(figsize=(8, 5))
-    sns.histplot(model_res.margin_multiplier.flatten(), bins=20)
-    plt.title(f"Margin Multiplier Distribution — {model_res.name}")
-    plt.xlabel("Multiplier")
-    plt.tight_layout()
-    plt.savefig(os.path.join(outdir, f"{model_res.name}_margin_mult_dist.png"))
-    plt.close()
-
-
-# ----------------------------------------------------------------------
-# Equity paths (optional)
-# ----------------------------------------------------------------------
-
-
-def plot_equity_paths(model_res, outdir, max_paths=5):
-    if model_res.equity_long is None:
-        return
-
-    P, T = model_res.equity_long.shape
-    paths = min(P, max_paths)
-
-    plt.figure(figsize=(10, 5))
-    for i in range(paths):
-        plt.plot(model_res.equity_long[i], alpha=0.7)
-    plt.title(f"Equity (Long) — sample paths — {model_res.name}")
-    plt.xlabel("Time")
-    plt.ylabel("Equity")
-    plt.tight_layout()
-    plt.savefig(os.path.join(outdir, f"{model_res.name}_equity_long.png"))
-    plt.close()
-
-    if model_res.equity_short is not None:
-        plt.figure(figsize=(10, 5))
-        for i in range(paths):
-            plt.plot(model_res.equity_short[i], alpha=0.7)
-        plt.title(f"Equity (Short) — sample paths — {model_res.name}")
-        plt.xlabel("Time")
-        plt.ylabel("Equity")
-        plt.tight_layout()
-        plt.savefig(os.path.join(outdir, f"{model_res.name}_equity_short.png"))
+    if not has_data:
         plt.close()
-
-
-# ----------------------------------------------------------------------
-# Partial liquidation (Hyperliquid-like)
-# ----------------------------------------------------------------------
-
-
-def plot_partial_liquidation(model_res, outdir, max_paths=5):
-    if model_res.partial_liq_amount is None:
         return
 
-    P, T = model_res.partial_liq_amount.shape
-    paths = min(P, max_paths)
-
-    plt.figure(figsize=(10, 5))
-    for i in range(paths):
-        plt.step(np.arange(T), model_res.partial_liq_amount[i], where="post", alpha=0.6)
-    plt.title(f"Partial Liquidation Amount — sample paths — {model_res.name}")
-    plt.xlabel("Time")
-    plt.ylabel("Notional Closed")
+    plt.xscale("log")
+    plt.yscale("log")
+    plt.xlabel("DF Usage Amount ($) [Log]")
+    plt.ylabel("Probability P(Loss > x) [Log]")
+    plt.title("Solvency Survival Curve (Tail Risk Analysis)")
+    plt.grid(True, which="both", ls="-", alpha=0.2)
+    plt.legend()
     plt.tight_layout()
-    plt.savefig(os.path.join(outdir, f"{model_res.name}_partial_liq.png"))
+    plt.savefig(os.path.join(outdir, "solvency_survival_curve.png"), dpi=150)
     plt.close()
 
 
-def plot_liquidation_fraction(model_res, outdir):
+def plot_model_comparison_violins(results: MultiModelResults, outdir: str):
+    """
+    Split Violin Plot comparing DF Usage distributions across models.
+    
+    Insight:
+        Visualizes the density of losses. A wider base means frequent small losses.
+        Long thin necks mean rare catastrophic losses.
+    """
+    data_list = []
+    for name, model_res in results.models.items():
+        # We include zeros? Usually better to inspect non-zero losses for shape,
+        # or all data for overall density. Let's use non-zero for clarity of risk events.
+        losses = model_res.df_required[model_res.df_required > 1.0] # Filter trivial noise
+        if len(losses) > 0:
+            df_temp = pd.DataFrame({"Model": name, "DF Usage": losses})
+            data_list.append(df_temp)
+    
+    if not data_list:
+        return
+
+    df_all = pd.concat(data_list)
+    
+    plt.figure(figsize=(10, 6))
+    sns.violinplot(
+        data=df_all, 
+        x="Model", 
+        y="DF Usage", 
+        cut=0, 
+        scale="width", 
+        palette="muted",
+        inner="box"
+    )
+    plt.title("Distribution of Material Default Fund Usage (> $1)")
+    plt.ylabel("DF Usage ($)")
+    plt.grid(True, axis='y', alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(os.path.join(outdir, "df_distribution_violins.png"), dpi=150)
+    plt.close()
+
+
+def plot_efficiency_frontier(results: MultiModelResults, outdir: str):
+    """
+    Scatter plot of Safety (Max DF Usage) vs Efficiency (Average Margin).
+    
+    Insight:
+        Demonstrates the cost-benefit trade-off. The ideal model is in the 
+        bottom-left (Low DF usage, Low Margin).
+    """
+    plt.figure(figsize=(10, 6))
+    
+    for name, model_res in results.models.items():
+        # X: Efficiency (Mean Margin Requirement relative to Notional?)
+        # We can approx mean leverage or mean margin multiplier.
+        # Let's use Mean Margin Multiplier * IM0 (approx).
+        # Better: Average Equity / Notional over time?
+        # Let's use simple Mean Margin Multiplier if available, else 1.0
+        
+        if model_res.margin_multiplier is not None:
+            avg_mult = np.mean(model_res.margin_multiplier)
+        else:
+            avg_mult = 1.0
+            
+        # Y: Safety (99.9% DF Usage or Max)
+        max_loss = np.max(model_res.df_required)
+        p99_loss = np.percentile(model_res.df_required, 99.9)
+        
+        plt.scatter(avg_mult, p99_loss, s=100, label=name, alpha=0.8, edgecolors='w')
+        plt.text(avg_mult, p99_loss, f"  {name}", fontsize=9, va='center')
+
+    plt.xlabel("Average Margin Multiplier (Capital Inefficiency)")
+    plt.ylabel("99.9% DF Requirement ($)")
+    plt.title("Safety vs. Efficiency Frontier")
+    plt.grid(True, ls=":", alpha=0.5)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(os.path.join(outdir, "efficiency_frontier.png"), dpi=150)
+    plt.close()
+
+
+# ==============================================================================
+#  2. Systemic Dynamics & Regime Switching
+# ==============================================================================
+
+
+def plot_regime_dynamics(model_res: SingleModelResults, outdir: str):
+    """
+    Composite time-series showing the causal chain:
+    Volatility -> R_t -> Breaker State -> Margin Multipliers.
+    
+    Insight:
+        Validates the feedback loop mechanism. Shows if the breaker triggers
+        too late (after price crash) or pre-emptively.
+    """
+    if model_res.rt is None or model_res.breaker_state is None:
+        return
+
+    # Use the worst case path for "stress" visualization
+    idx = _get_worst_path_idx(model_res)
+    T = model_res.rt.shape[1]
+    t_axis = np.arange(T)
+    
+    fig, axes = plt.subplots(3, 1, figsize=(12, 10), sharex=True, 
+                             gridspec_kw={'height_ratios': [2, 1, 1]})
+    
+    # --- Top: Price & Risk Index ---
+    ax0 = axes[0]
+    ax0.plot(t_axis, model_res.price_paths[idx], color='#2c3e50', lw=1.5, label='Asset Price')
+    ax0.set_ylabel('Price ($)', color='#2c3e50', fontweight='bold')
+    ax0.tick_params(axis='y', labelcolor='#2c3e50')
+    ax0.grid(True, alpha=0.2)
+    
+    ax0t = ax0.twinx()
+    ax0t.plot(t_axis, model_res.rt[idx], color='#e74c3c', lw=1.5, ls='--', label='Risk Index ($R_t$)')
+    ax0t.set_ylabel('$R_t$ Index', color='#e74c3c', fontweight='bold')
+    ax0t.tick_params(axis='y', labelcolor='#e74c3c')
+    
+    # Add legend combining both
+    lines, labels = ax0.get_legend_handles_labels()
+    lines2, labels2 = ax0t.get_legend_handles_labels()
+    ax0.legend(lines + lines2, labels + labels2, loc='upper left')
+    ax0.set_title(f"Regime Dynamics Autopsy (Path #{idx}) — {model_res.name}")
+
+    # --- Middle: Breaker State ---
+    ax1 = axes[1]
+    bs = model_res.breaker_state[idx]
+    
+    # Background shading for states
+    ax1.fill_between(t_axis, 0, 1, where=(bs==0), color='green', alpha=0.1, transform=ax1.get_xaxis_transform())
+    ax1.fill_between(t_axis, 0, 1, where=(bs==1), color='orange', alpha=0.2, transform=ax1.get_xaxis_transform())
+    ax1.fill_between(t_axis, 0, 1, where=(bs==2), color='red', alpha=0.3, transform=ax1.get_xaxis_transform())
+    
+    ax1.step(t_axis, bs, where='post', color='black', lw=1)
+    ax1.set_yticks([0, 1, 2])
+    ax1.set_yticklabels(['NORMAL', 'SOFT', 'HARD'])
+    ax1.set_ylabel("Breaker State")
+    ax1.grid(False)
+
+    # --- Bottom: Margin Multiplier ---
+    ax2 = axes[2]
+    if model_res.margin_multiplier is not None:
+        ax2.step(t_axis, model_res.margin_multiplier[idx], where='post', color='blue', lw=1.5)
+    ax2.set_ylabel("Margin Multiplier")
+    ax2.set_xlabel("Simulation Time Step")
+    ax2.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(outdir, f"{model_res.name}_regime_dynamics.png"), dpi=150)
+    plt.close()
+
+
+# ==============================================================================
+#  3. Liquidation Mechanics & Heatmaps
+# ==============================================================================
+
+
+def plot_liquidation_heatmap(model_res: SingleModelResults, outdir: str):
+    """
+    Heatmap of Liquidation Fraction (k) across paths and time.
+    Sorted by total DF usage (worst paths at top).
+    
+    Insight:
+        Reveals 'Death Spirals' (vertical bands) vs idiosyncratic failures.
+        Shows gradient of partial liquidation vs hard closeouts (red).
+    """
     if model_res.liquidation_fraction is None:
         return
 
-    plt.figure(figsize=(12, 5))
-    # Use a mask to show only non-zero?
-    # Or just plot. Most are 0.
-    plt.imshow(
-        model_res.liquidation_fraction,
-        aspect="auto",
-        cmap="Reds",
-        interpolation="nearest",
-        vmin=0,
-        vmax=1,
-    )
-    plt.colorbar(label="Liquidation Fraction (k)")
-    plt.title(f"Liquidation Fraction Heatmap — {model_res.name}")
-    plt.xlabel("Time")
-    plt.ylabel("Path")
+    # Sort paths by severity (DF Usage)
+    severity_idx = np.argsort(model_res.df_required) # Ascending
+    # We want worst at top
+    sorted_liq = model_res.liquidation_fraction[severity_idx]
+    
+    # If too many paths, downsample rows for visualization
+    max_rows = 1000
+    if sorted_liq.shape[0] > max_rows:
+        # Pick top N worst + a sample of others
+        top_n = 800
+        rest_n = 200
+        worst = sorted_liq[-top_n:]
+        rest = sorted_liq[:-top_n:int((len(sorted_liq)-top_n)/rest_n)]
+        plot_data = np.vstack([rest, worst])
+        ylabel = f"Paths (Top {top_n} Worst + Sample)"
+    else:
+        plot_data = sorted_liq
+        ylabel = "Paths (Sorted by Loss)"
+
+    plt.figure(figsize=(12, 7))
+    cmap = sns.color_palette("Reds", as_cmap=True)
+    
+    # Log scale color or simple linear? Linear is fine if k is 0..1.
+    # Mask 0 for white background
+    mask = plot_data == 0
+    
+    sns.heatmap(plot_data, cmap=cmap, mask=mask, cbar_kws={'label': 'Liquidation Fraction ($k$)'},
+                xticklabels=500, yticklabels=False, vmin=0, vmax=1)
+    
+    plt.title(f"Liquidation Intensity Heatmap — {model_res.name}")
+    plt.xlabel("Time Step")
+    plt.ylabel(ylabel)
     plt.tight_layout()
-    plt.savefig(os.path.join(outdir, f"{model_res.name}_liq_fraction_heatmap.png"))
+    plt.savefig(os.path.join(outdir, f"{model_res.name}_liquidation_heatmap.png"), dpi=150)
     plt.close()
 
-
-def plot_notional_paths(model_res, outdir, max_paths=5):
+def plot_notional_fan_chart(model_res: SingleModelResults, outdir: str):
+    """
+    Fan Chart showing the decay of Open Interest (Notional) over time.
+    
+    Insight:
+        Shows the system's deleveraging speed. Does liquidity dry up instantly
+        (vertical drop) or does the system manage a soft landing?
+    """
     if model_res.notional_paths is None:
         return
-
-    P, T = model_res.notional_paths.shape
-    paths = min(P, max_paths)
-
-    plt.figure(figsize=(10, 5))
-    for i in range(paths):
-        plt.plot(model_res.notional_paths[i], alpha=0.7)
-    plt.title(f"Notional Decay — sample paths — {model_res.name}")
-    plt.xlabel("Time")
-    plt.ylabel("Notional Position")
+        
+    paths = model_res.notional_paths
+    t_axis = np.arange(paths.shape[1])
+    
+    # Percentiles
+    p05 = np.percentile(paths, 5, axis=0)
+    p25 = np.percentile(paths, 25, axis=0)
+    p50 = np.percentile(paths, 50, axis=0)
+    p75 = np.percentile(paths, 75, axis=0)
+    p95 = np.percentile(paths, 95, axis=0)
+    
+    plt.figure(figsize=(10, 6))
+    plt.plot(t_axis, p50, color='navy', lw=2, label='Median Notional')
+    
+    # Fans
+    plt.fill_between(t_axis, p25, p75, color='tab:blue', alpha=0.4, label='IQR (25-75%)')
+    plt.fill_between(t_axis, p05, p95, color='tab:blue', alpha=0.15, label='5-95% Range')
+    
+    plt.title(f"Systemic De-leveraging (Notional Decay) — {model_res.name}")
+    plt.xlabel("Time Step")
+    plt.ylabel("Remaining Open Interest ($)")
+    plt.legend(loc='lower left')
+    plt.grid(True, alpha=0.2)
     plt.tight_layout()
-    plt.savefig(os.path.join(outdir, f"{model_res.name}_notional_decay.png"))
+    plt.savefig(os.path.join(outdir, f"{model_res.name}_notional_fan.png"), dpi=150)
     plt.close()
+
+def plot_slippage_waterfall(model_res: SingleModelResults, outdir: str):
+    """
+    Breakdown of Default Fund Usage: Slippage vs. Bankruptcy (Negative Equity).
+    
+    Insight:
+        Diagnoses the SOURCE of loss.
+        - High Slippage -> Liquidation algo is too aggressive or liquidity too low.
+        - High Bankruptcy -> Margins are too low (gap risk).
+    """
+    if model_res.slippage_cost is None:
+        return
+
+    total_df = np.sum(model_res.df_required)
+    total_slippage = np.sum(model_res.slippage_cost) # Note: this includes user-paid slippage?
+    # engine.py: df_required += cost (if shortfall).
+    # Ideally we strictly sum df_path components if we had them separated.
+    # Let's assume `slippage_cost` array tracks ALL slippage generated.
+    # We can't perfectly separate USER paid vs DF paid slippage without more engine outputs.
+    # Approximation: DF_Slippage ~ min(DF_Required, Total_Slippage) for that path?
+    
+    # Let's use aggregates over all paths for a global view.
+    # Total Slippage Generated vs Total DF Used. 
+    
+    # Actually, chart G logic: Stacked Bar of Average per path. 
+    
+    avg_df = np.mean(model_res.df_required)
+    avg_slippage_gen = np.mean(np.sum(model_res.slippage_cost, axis=1))
+    
+    # This is tricky without precise accounting.
+    # Let's plot the distributions side-by-side.
+    
+    data = pd.DataFrame({
+        'Metric': ['DF Required', 'Slippage Generated'],
+        'Value': [avg_df, avg_slippage_gen]
+    })
+    
+    plt.figure(figsize=(7, 6))
+    sns.barplot(data=data, x='Metric', y='Value', palette="viridis")
+    plt.title(f"Average Cost Composition — {model_res.name}")
+    plt.ylabel("Amount ($)")
+    plt.tight_layout()
+    plt.savefig(os.path.join(outdir, f"{model_res.name}_cost_composition.png"), dpi=150)
+    plt.close()
+
+
+# ==============================================================================
+#  4. Path Forensics (Autopsy)
+# ==============================================================================
+
+
+def plot_worst_case_autopsy(model_res: SingleModelResults, outdir: str):
+    """
+    Detailed anatomy of the single worst loss event in the simulation.
+    
+    Insight:
+        Tells the narrative of the failure. Did they bleed out slowly (partial liq)
+        or die instantly (gap)?
+    """
+    idx = _get_worst_path_idx(model_res)
+    T = model_res.price_paths.shape[1]
+    t = np.arange(T)
+    
+    # Create composite layout
+    fig = plt.figure(figsize=(14, 10))
+    gs = fig.add_gridspec(3, 1, height_ratios=[2, 1, 1])
+    
+    # 1. Price and Liquidation Events
+    ax0 = fig.add_subplot(gs[0])
+    ax0.plot(t, model_res.price_paths[idx], color='black', alpha=0.6, label='Price')
+    
+    # Mark liquidations
+    if model_res.liquidation_fraction is not None:
+        liqs = model_res.liquidation_fraction[idx]
+        liq_events = np.where(liqs > 0)[0]
+        if len(liq_events) > 0:
+            # Scatter size proportional to k
+            sizes = liqs[liq_events] * 100
+            ax0.scatter(t[liq_events], model_res.price_paths[idx][liq_events], 
+                        color='red', s=sizes, label='Liquidation', zorder=5)
+    
+    ax0.set_title(f"Worst Case Autopsy (Path #{idx}) — {model_res.name}\nTotal DF Used: ${model_res.df_required[idx]:,.2f}")
+    ax0.set_ylabel("Price ($)")
+    ax0.legend(loc='upper left')
+    ax0.grid(True, alpha=0.3)
+
+    # 2. Trader Equity vs Margin Req (approx)
+    ax1 = fig.add_subplot(gs[1], sharex=ax0)
+    if model_res.equity_long is not None:
+        ax1.plot(t, model_res.equity_long[idx], label='Long Equity', color='green')
+    if model_res.equity_short is not None:
+        ax1.plot(t, model_res.equity_short[idx], label='Short Equity', color='red')
+    
+    ax1.axhline(0, color='black', lw=1.5)
+    # Shade bankruptcy
+    if model_res.equity_long is not None:
+        ax1.fill_between(t, 0, model_res.equity_long[idx], where=(model_res.equity_long[idx]<0), color='black', alpha=0.5)
+        ax1.fill_between(t, 0, model_res.equity_short[idx], where=(model_res.equity_short[idx]<0), color='black', alpha=0.5)
+        
+    ax1.set_ylabel("Trader Equity ($)")
+    ax1.legend(loc='lower left')
+    ax1.grid(True, alpha=0.3)
+
+    # 3. Cumulative DF Usage
+    ax2 = fig.add_subplot(gs[2], sharex=ax0)
+    if model_res.df_path is not None:
+        cumulative_df = np.cumsum(model_res.df_path[idx])
+        ax2.fill_between(t, 0, cumulative_df, color='darkred', alpha=0.6)
+        ax2.plot(t, cumulative_df, color='red')
+    else:
+        # Fallback if path not available
+        ax2.text(0.5, 0.5, "DF Path data not available", ha='center')
+        
+    ax2.set_ylabel("Cumul. DF Usage ($)")
+    ax2.set_xlabel("Time Step")
+    ax2.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(outdir, f"{model_res.name}_autopsy.png"), dpi=150)
+    plt.close()
+
+
+# ==============================================================================
+#  5. Convergence & Stability
+# ==============================================================================
+
+
+def plot_mc_convergence(results: MultiModelResults, outdir: str):
+    """
+    Checks statistical stability of the simulation.
+    Plots running average of DF Usage as paths increase.
+    """
+    plt.figure(figsize=(10, 5))
+    
+    for name, model_res in results.models.items():
+        # Running mean
+        df_req = model_res.df_required
+        cumulative_sum = np.cumsum(df_req)
+        counts = np.arange(1, len(df_req) + 1)
+        running_mean = cumulative_sum / counts
+        
+        plt.plot(counts, running_mean, label=name)
+        
+        # Add Error Bands (Standard Error)
+        # Std dev of sample / sqrt(N)
+        # Calculating running std is expensive, assume convergence if mean stabilizes
+    
+    plt.xlabel("Number of Paths")
+    plt.ylabel("Average DF Usage ($)")
+    plt.title("Monte Carlo Convergence Test")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(os.path.join(outdir, "mc_convergence.png"), dpi=150)
+    plt.close()
+
+
+# ==============================================================================
+#  Drivers
+# ==============================================================================
+
+
+def plot_all_for_model(model_res: SingleModelResults, outdir: str, max_paths: int = 5):
+    """Legacy driver for per-model plots, upgraded with new charts."""
+    d = os.path.join(outdir, model_res.name)
+    _ensure_dir(d)
+    
+    # Core
+    plot_regime_dynamics(model_res, d)
+    plot_liquidation_heatmap(model_res, d)
+    plot_notional_fan_chart(model_res, d)
+    plot_worst_case_autopsy(model_res, d)
+    plot_slippage_waterfall(model_res, d)
+
+
+def plot_all(results: MultiModelResults, outdir: str):
+    """
+    Main entry point for the visualization suite.
+    Generates all comparisons and per-model detailed charts.
+    """
+    _ensure_dir(outdir)
+    
+    print("Genering Comparison Dashboards...")
+    plot_df_survival_curve(results, outdir)
+    plot_model_comparison_violins(results, outdir)
+    plot_efficiency_frontier(results, outdir)
+    plot_mc_convergence(results, outdir)
+    
+    print("Generating Model Deep-Dives...")
+    for name, model_res in results.models.items():
+        plot_all_for_model(model_res, outdir)

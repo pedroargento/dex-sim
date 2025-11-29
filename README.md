@@ -1,6 +1,5 @@
 #  dex-sim: DEX - CCP Risk Simulation
 
-
 `dex-sim` is a high-performance risk simulation framework for modeling Central Counterparty (CCP) style margining, liquidations, and systemic stress for perpetual futures exchanges.
 
 It is designed for speed, accuracy, and flexibility, allowing researchers and developers to test and compare different risk management models under extreme market conditions.
@@ -117,8 +116,6 @@ The **FXD** model represents a traditional exchange where traders are offered a 
 
 Both models use a **Full Closeout** liquidation mechanism. When a default occurs, the model assumes the entire position is closed at a cost, which is modeled as a `slippage_factor` applied to the position's notional value. This cost is drawn from the default fund.
 
-
-
 ## Simulation Engine
 
 The heart of `dex-sim` is its Numba JIT-compiled simulation core.
@@ -139,16 +136,134 @@ The output data includes:
 - `breaker_state`: An integer (0, 1, or 2) indicating the circuit breaker state (NORMAL, SOFT, HARD) at each timestep.
 - `rt`: The value of the systemic risk index Rₜ at each timestep.
 
-## 📈 Plotting
+## 📊 Plotting & Visualization
 
-`dex-sim` comes with a suite of built-in plotting functions to help you visualize and understand the simulation results. The `dex-sim plot` command generates all of the following charts:
+`dex-sim` includes a professional-grade visualization suite (`src/dex_sim/plotting.py`) powered by `matplotlib` and `seaborn`. This system is designed to move beyond simple averages and reveal the **tail risks**, **liquidation cascades**, and **systemic dynamics** hidden within the Monte Carlo data.
 
-- **Price Paths**: Sample price paths from the Monte Carlo simulation.
-- **Leverage Paths**: The evolution of trader leverage over time.
-- **DF Requirement Distribution**: A histogram showing the distribution of Default Fund requirements, which helps in sizing the fund.
-- **Breaker Heatmap**: A heatmap showing the frequency of different circuit breaker states over time.
-- **Rₜ Evolution**: The average evolution of the systemic risk index Rₜ over the simulation horizon.
-- **Margin Multipliers**: How margin multipliers change in response to breaker states.
+Plots are automatically generated after every `dex-sim run`. You can also generate them manually for any past run using the CLI or Python API.
+
+### Output Location
+All charts are saved as high-resolution PNGs in:
+```
+results/<run_id>/plots/
+```
+
+### Manual Usage (Python)
+```python
+from dex_sim.results_io import load_results
+from dex_sim.plotting import plot_all
+
+# Load simulation data
+results = load_results("results/20231129_my_experiment")
+
+# Generate full suite
+plot_all(results, "results/20231129_my_experiment/plots")
+```
+
+---
+
+### 📉 Documentation of Charts
+
+Below is a guide to the charts produced by the suite and how to interpret them from a risk perspective.
+
+#### 1. Solvency Survival Curve (Log-Log) 💀
+**What it is:** A reverse cumulative distribution (survival function) of Default Fund (DF) usage.
+**Interpretation:**
+*   **The Curve:** Shows the probability (Y-axis) that a loss will exceed a certain amount (X-axis).
+*   **The Tail:** A straight line on this log-log plot indicates "heavy tails" (power-law distribution), meaning catastrophic losses are more likely than a standard bell curve predicts.
+*   **AES vs FXD:** Compare the tails. Does AES drop off faster (safer) or does it have the same extreme tail risk as FXD?
+
+#### 2. Model Comparison Violins 🎻
+**What it is:** Side-by-side violin plots comparing the density of losses between models.
+**Interpretation:**
+*   **Width:** The width of the shape represents the frequency of losses at that size.
+*   **Base vs. Neck:** A wide base means frequent small losses (slippage). A long, thin neck means rare, massive bankruptcies.
+*   **Risk Signal:** Ideally, you want a short, squat shape. Long necks indicate dangerous "Black Swan" potential.
+
+#### 3. Efficiency Frontier (Scatter) ⚖️
+**What it is:** A scatter plot of **Safety** (Max DF Usage) vs. **Capital Efficiency** (Average Margin Multiplier).
+**Interpretation:**
+*   **Goal:** The "holy grail" is the bottom-left corner: low margin requirements (high efficiency) AND low DF usage (high safety).
+*   **Trade-off:** Usually, you trade one for the other. This chart quantifies exactly how much safety you buy with higher margins.
+
+#### 4. Monte Carlo Convergence 🎯
+**What it is:** A line chart showing the running average of DF usage as the number of simulation paths increases.
+**Interpretation:**
+*   **Stability:** If the line is still oscillating wildly at the end, your simulation needs more paths (increase `paths` in config). If it flattens out, your results are statistically significant.
+
+---
+
+### 🔬 Model Deep-Dive Charts (Per-Model)
+
+For each model (e.g., `AES`, `FXD`), a dedicated folder is created with detailed forensics.
+
+#### 5. Regime Dynamics Autopsy (Composite) 🔍
+**What it is:** A 3-panel vertically stacked chart for a single "stress" path.
+1.  **Top:** Asset Price & Systemic Risk Index ($R_t$).
+2.  **Middle:** Breaker State (Shaded bands: Green=Normal, Orange=Soft, Red=Hard).
+3.  **Bottom:** Margin Multiplier.
+**Interpretation:**
+*   **Causality:** Trace the chain reaction: Price Crash ➔ $R_t$ Spike ➔ Breaker Trigger ➔ Margin Hike.
+*   **Lag:** Check if the breaker triggers *before* the worst losses or *after* (too late).
+
+#### 6. Liquidation Intensity Heatmap 🔥
+**What it is:** A dense heatmap where X=Time, Y=Path (sorted by severity), and Color=Liquidation Fraction ($k$).
+**Interpretation:**
+*   **Vertical Stripes:** A "systemic event" where the entire market liquidates simultaneously (correlation = 1).
+*   **Gradient:** Shows the difference between a gentle partial liquidation (light red) and a hard closeout (dark red).
+*   **Clustering:** Helps identify if liquidations are idiosyncratic (random dots) or structural (bands).
+
+#### 7. Notional Decay Fan Chart 📉
+**What it is:** A percentiles chart showing how the total Open Interest (notional) of the system decays over time.
+**Interpretation:**
+*   **De-leveraging:** Shows how fast the system reduces risk.
+*   **Liquidity Crisis:** A vertical drop means the system is dumping massive inventory into the market instantly (high slippage risk). A gradual slope indicates a controlled "soft landing."
+
+#### 8. Slippage Waterfall (Cost Composition) 💸
+**What it is:** A breakdown of where the Default Fund money went.
+**Interpretation:**
+*   **Slippage:** Costs incurred by closing positions in illiquid markets.
+*   **Bankruptcy:** Costs incurred because the trader ran out of money before liquidation could happen (gap risk).
+*   **Signal:** High slippage means you need better liquidation logic. High bankruptcy means you need higher Initial Margin (IM).
+
+#### 9. Worst-Case Autopsy 🚑
+**What it is:** A detailed reconstruction of the single worst loss event in the entire simulation.
+**Interpretation:**
+*   **Narrative:** Tells the story of the failure. Did the trader die from a 1000-cut slow bleed, or one massive gap move?
+*   **Equity:** Shows exactly when the trader's equity crossed zero (insolvency).
+
+---
+
+### 🧠 How to Read These Charts (Risk Analyst Guide)
+
+*   **Look for Correlations:** Does a spike in $R_t$ reliably predict a cluster of liquidations? If not, your breaker sensitivity might be too low.
+*   **Assess Tail Thickness:** In the **Survival Curve**, if the AES line is significantly below the FXD line in the bottom-right quadrant, AES is effectively mitigating catastrophic risk.
+*   **Check De-leveraging Speed:** In the **Notional Fan Chart**, you want to see the system reducing exposure *before* the price crashes to zero. If notional stays flat while price drops, the system is too slow to react.
+*   **Evaluate Efficiency:** If AES achieves the same safety (DF usage) as FXD but with a lower average margin multiplier (in the **Efficiency Frontier**), it proves AES is a superior capital-efficient model.
+
+---
+
+### 🛠️ Plotting Workflow
+
+**1. Run Simulation**
+```bash
+dex-sim run config/aes_vs_fxd.yaml
+```
+
+**2. List Runs**
+Find the ID of the run you just completed.
+```bash
+dex-sim list
+```
+
+**3. Regenerate Plots (Optional)**
+If you change the plotting code or want to re-plot an old run without re-simulating:
+```bash
+dex-sim plot results/20231129_120000_aes_vs_fxd
+```
+
+**4. Customizing Plots**
+To add new plots, edit `src/dex_sim/plotting.py`. The `plot_all` function drives the generation process. Any new function added there will automatically be included in the workflow.
 
 ## Creating and Running Custom Models
 

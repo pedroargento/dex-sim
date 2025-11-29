@@ -15,7 +15,7 @@ from .models import (
     FullCloseOut,
 )
 from .results_io import save_results, load_results
-from .plotting import plot_all_for_model
+from .plotting import plot_all
 
 
 # ------------------------------------------------------------
@@ -160,10 +160,8 @@ def plot_experiment(run_dir: str):
     outdir = os.path.join(run_dir, "plots")
     ensure_dir(outdir)
 
-    print("Plotting models...")
-    for name, res in results.models.items():
-        print(f" → {name}")
-        plot_all_for_model(res, outdir=outdir, max_paths=5)
+    print("Generating visualization suite...")
+    plot_all(results, outdir)
 
     print("Plots saved in:", outdir)
 

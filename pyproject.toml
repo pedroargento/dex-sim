@@ -1,5 +1,5 @@
 [project]
-name = "minimal-sim"
+name = "dex-sim"
 version = "0.1.0"
 description = "A minimalistic deterministic simulation for leverage, margin, and CCP logic"
 authors = [{ name = "Pedro Argento" }]
@@ -14,6 +14,9 @@ dependencies = [
     "scipy>=1.8",
     "matplotlib>=3.7",
     "seaborn>=0.13.2",
+    "numba>=0.62.1",
+    "zarr>=2.18.3",
+    "pyyaml>=6.0.3",
 ]
 
 [project.optional-dependencies]
@@ -29,3 +32,12 @@ include = ["sim*"]
 [tool.ruff]
 line-length = 100
 
+[project.scripts]
+dex-sim = "dex_sim.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+# (Optional) include non-Python files
+[tool.setuptools.package-data]
+"*" = ["*.json", "*.yaml"]

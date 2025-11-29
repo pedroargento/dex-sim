@@ -483,6 +483,73 @@ def plot_mc_convergence(results: MultiModelResults, outdir: str):
 
 
 # ==============================================================================
+#  6. System Leverage Analysis
+# ==============================================================================
+
+
+def plot_system_leverage(model_res: SingleModelResults, outdir: str):
+    """
+    Visualizes aggregate system leverage for Long vs Short sides over time.
+    
+    Insight:
+        - Tracks how leverage spikes during market moves.
+        - Shows if AES effectively caps leverage compared to FXD.
+        - Highlights the asymmetry between Long/Short leverage during trends.
+    """
+    # Check if we have leverage data
+    if model_res.lev_long is None or model_res.lev_short is None:
+        return
+
+    # Arrays are [Paths, Time]. We want statistics over Paths.
+    # Use nanmean/nanpercentile because failed paths might have NaNs.
+    
+    t_axis = np.arange(model_res.lev_long.shape[1])
+    
+    # Long Side Stats
+    l_mean = np.nanmean(model_res.lev_long, axis=0)
+    l_p05 = np.nanpercentile(model_res.lev_long, 5, axis=0)
+    l_p95 = np.nanpercentile(model_res.lev_long, 95, axis=0)
+
+    # Short Side Stats
+    s_mean = np.nanmean(model_res.lev_short, axis=0)
+    s_p05 = np.nanpercentile(model_res.lev_short, 5, axis=0)
+    s_p95 = np.nanpercentile(model_res.lev_short, 95, axis=0)
+
+    plt.figure(figsize=(10, 6))
+    
+    # Long Plot (Blue)
+    plt.plot(t_axis, l_mean, color='tab:blue', lw=2, label='Long Leverage (Mean)')
+    plt.fill_between(t_axis, l_p05, l_p95, color='tab:blue', alpha=0.15, label='Long 5-95% Range')
+
+    # Short Plot (Red)
+    plt.plot(t_axis, s_mean, color='tab:red', lw=2, label='Short Leverage (Mean)')
+    plt.fill_between(t_axis, s_p05, s_p95, color='tab:red', alpha=0.15, label='Short 5-95% Range')
+
+    # Optional: Overlay Breaker States (Mode)
+    if model_res.breaker_state is not None:
+        # Calculate mode of breaker state at each timestep
+        # scipy.stats.mode is robust but heavy. Let's just check mean > threshold for visual indication?
+        # Or just: if > 50% of paths are in HARD state, shade it.
+        
+        # Fraction of paths in Hard State (2)
+        frac_hard = np.mean(model_res.breaker_state == 2, axis=0)
+        # Shade regions where > 20% of paths are Hard
+        mask_hard = frac_hard > 0.2
+        plt.fill_between(t_axis, 0, plt.ylim()[1], where=mask_hard, 
+                         color='gray', alpha=0.1, transform=plt.gca().get_xaxis_transform(), 
+                         label='High Stress Regime (>20% Breakers)')
+
+    plt.title(f"Total System Leverage Over Time (Long vs Short) — {model_res.name}")
+    plt.xlabel("Time Step")
+    plt.ylabel("Effective Leverage (x)")
+    plt.legend(loc='upper left')
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(os.path.join(outdir, f"{model_res.name}_system_leverage.png"), dpi=150)
+    plt.close()
+
+
+# ==============================================================================
 #  Drivers
 # ==============================================================================
 
@@ -498,6 +565,7 @@ def plot_all_for_model(model_res: SingleModelResults, outdir: str, max_paths: in
     plot_notional_fan_chart(model_res, d)
     plot_worst_case_autopsy(model_res, d)
     plot_slippage_waterfall(model_res, d)
+    plot_system_leverage(model_res, d)
 
 
 def plot_all(results: MultiModelResults, outdir: str):

@@ -16,6 +16,7 @@ from .models import (
 )
 from .results_io import save_results, load_results
 from .plotting import plot_all
+from .summary import generate_summary
 
 
 # ------------------------------------------------------------
@@ -140,6 +141,10 @@ def run_experiment_from_config(config_file: str, root: str = "results") -> str:
     # Save results + metadata
     print(f"Saving results → {outdir}")
     save_results(results, outdir)
+
+    # Generate Summary Report
+    report_path = generate_summary(results, outdir)
+    print(f"Summary report → {report_path}")
 
     with open(os.path.join(outdir, "config_used.yaml"), "w") as f:
         yaml.safe_dump(cfg, f)

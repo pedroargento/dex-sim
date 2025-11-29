@@ -136,6 +136,67 @@ The output data includes:
 - `breaker_state`: An integer (0, 1, or 2) indicating the circuit breaker state (NORMAL, SOFT, HARD) at each timestep.
 - `rt`: The value of the systemic risk index Rₜ at each timestep.
 
+## 📑 Simulation Summary & Reporting
+
+`dex-sim` includes a comprehensive reporting system that automatically generates a quantitative summary of the simulation results. This summary is designed to provide risk committees, researchers, and developers with immediate, actionable metrics derived directly from the simulation data.
+
+### Purpose
+- Aggregates all numerical risk metrics derived from `SimulationResults`.
+- Provides a standardized "scorecard" for comparing model performance (e.g., AES vs FXD).
+- Saved automatically to: `results/<run_id>/summary.md`.
+
+### Manual Generation
+You can manually regenerate the summary for any existing run:
+
+```python
+from dex_sim.results_io import load_results
+from dex_sim.summary import generate_summary
+
+# Load results and generate summary
+results = load_results("results/20231129_my_experiment")
+generate_summary(results, "results/20231129_my_experiment")
+```
+
+### Documented Metrics
+
+The summary report includes the following data-derived metrics, grouped by category:
+
+#### 1) Default & Waterfall Metrics
+*   **Probability of Default (PoD)**: Percentage of paths where the Default Fund was utilized (`count(df > 0) / total_paths`).
+*   **DF Usage Distribution**: Mean, Median, 99th percentile (VaR), and Max DF usage across all paths.
+*   **Expected Shortfall (ES 99%)**: Average DF usage for the worst 1% of outcomes.
+*   **Insolvency Loss**: Total loss due to negative equity (bankruptcy).
+
+#### 2) Leverage Metrics
+*   **Mean System Leverage**: Average leverage across all paths and timesteps.
+*   **Max Peak Leverage**: The highest single leverage value observed in any path/timestep.
+*   **Time > 20x/50x**: Percentage of simulation time where leverage exceeded 20x or 50x.
+
+#### 3) Systemic Stress Metrics (Rₜ) (AES Only)
+*   **Mean/Max Rₜ**: Average and peak values of the systemic risk index.
+*   **Rₜ Volatility**: Standard deviation of the risk index.
+
+#### 4) Breaker Metrics (AES Only)
+*   **Regime Occupancy**: Percentage of time spent in `NORMAL`, `SOFT`, and `HARD` breaker states.
+*   **Mean Margin Multiplier**: The average multiplier applied to Initial Margin requirements.
+
+#### 5) Liquidation Metrics
+*   **Event Count**: Total number of liquidation events across all paths.
+*   **Mean Fraction ($k$)**: Average portion of the position closed during a liquidation event.
+*   **Cascade Frequency**: Percentage of timesteps where >5% of paths liquidated simultaneously.
+*   **Full vs. Partial**: Counts of full closeouts ($k=1.0$) vs. partial reductions ($k < 1.0$).
+
+#### 6) Slippage Metrics
+*   **Total Slippage Cost**: Sum of all slippage costs incurred by the system.
+*   **Cost Composition**: Breakdown of total losses into Insolvency (Gap Risk) vs. Slippage (Liquidity Risk).
+
+#### 7) Exposure & Notional Metrics
+*   **Survival Rate**: Percentage of paths that ended with a non-zero position.
+*   **Mean Final Notional**: Average remaining open interest at the end of the simulation.
+
+#### 8) Model Comparison Tables
+*   **Scorecard**: A side-by-side comparison table of key metrics (PoD, Max Loss, VaR, Avg Leverage) for all models in the experiment.
+
 ## 📊 Plotting & Visualization
 
 `dex-sim` includes a professional-grade visualization suite (`src/dex_sim/plotting.py`) powered by `matplotlib` and `seaborn`. This system is designed to move beyond simple averages and reveal the **tail risks**, **liquidation cascades**, and **systemic dynamics** hidden within the Monte Carlo data.

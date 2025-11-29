@@ -112,6 +112,8 @@ def run_experiment_from_config(config_file: str, root: str = "results") -> str:
                 "Old `total_oi`+`oi_fraction` interface is deprecated."
             )
 
+    partial_liquidation = cfg.get("partial_liquidation", False)
+
     np.random.seed(seed)
 
     print("\n=== Running Experiment ===")
@@ -121,6 +123,7 @@ def run_experiment_from_config(config_file: str, root: str = "results") -> str:
     print(f"Paths: {num_paths}")
     print(f"Notional per side: {notional:,.0f}")
     print(f"Stress factor: {stress_factor}")
+    print(f"Partial Liquidation: {partial_liquidation}")
     print()
 
     # Run simulation
@@ -131,6 +134,7 @@ def run_experiment_from_config(config_file: str, root: str = "results") -> str:
         notional=notional,
         stress_factor=stress_factor,
         garch_params_file=garch_params,
+        partial_liquidation=partial_liquidation,
     )
 
     # Save results + metadata

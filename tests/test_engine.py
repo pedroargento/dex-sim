@@ -60,14 +60,18 @@ def test_simulate_paths_numba_basic():
     # Note: _simulate_paths_numba loop starts at t=1. 
     # log_returns[p, t] is used for step t.
     
-    # Pre-calculate dPnL as done in run_models_numba
-    # dPnL = notional * (exp(log_returns) - 1.0)
-    dPnL = notional * (np.exp(log_returns) - 1.0)
+    # Pre-calculate pct_returns
+    pct_returns = np.exp(log_returns) - 1.0
+    dPnL = notional * pct_returns # For checking
     
     margin_mult = np.ones((P, T))
     
-    df_required, defaults, price_paths, lev_long, lev_short = _simulate_paths_numba(
-        log_returns, dPnL, initial_price, im0, notional, slippage_factor, margin_mult
+    (
+        df_required, defaults, price_paths, lev_long, lev_short,
+        liquidation_fraction, notional_path, equity_long, equity_short, df_path, slippage_cost
+    ) = _simulate_paths_numba(
+        log_returns, pct_returns, initial_price, im0, notional, slippage_factor, margin_mult,
+        do_partial_liquidation=False
     )
     
     # Check shapes
@@ -92,6 +96,12 @@ def test_simulate_paths_numba_basic():
     # Default = 1. Dead = True.
     
     vm_t1 = dPnL[0, 1]
+    # Note: The new logic checks bankruptcy: eqS < 0.
+    # eqS starts at 100. vm = 105.17.
+    # eqS becomes 100 - 105.17 = -5.17.
+    # eqS < 0 -> Default.
+    # df_loss = -eqS = 5.17.
+    
     assert df_required[0] == pytest.approx(vm_t1 - 100.0) # Shortfall
     assert defaults[0] == 1
     
@@ -100,30 +110,75 @@ def test_simulate_paths_numba_basic():
     assert np.isnan(lev_short[0, 2])
 
 def test_simulate_paths_numba_no_default():
-    # 1 Path, 2 Timesteps. Small move.
+    # 1 Path, 2 Timesteps. Zero move -> No Default.
     P, T = 1, 2
     initial_price = 100.0
     notional = 1000.0
     im0 = 100.0
     slippage_factor = 0.0
     
-    log_returns = np.array([[0.0, 0.01]])
-    dPnL = notional * (np.exp(log_returns) - 1.0)
+    log_returns = np.array([[0.0, 0.0]])
+    pct_returns = np.zeros_like(log_returns)
+    dPnL = np.zeros_like(log_returns)
+
     margin_mult = np.ones((P, T))
     
-    df_required, defaults, price_paths, lev_long, lev_short = _simulate_paths_numba(
-        log_returns, dPnL, initial_price, im0, notional, slippage_factor, margin_mult
+    (
+        df_required, defaults, price_paths, lev_long, lev_short,
+        liquidation_fraction, notional_path, equity_long, equity_short, df_path, slippage_cost
+    ) = _simulate_paths_numba(
+        log_returns, pct_returns, initial_price, im0, notional, slippage_factor, margin_mult,
+        do_partial_liquidation=False
     )
     
     assert df_required[0] == 0.0
     assert defaults[0] == 0
     
-    # t=1: vm ~ 10.05
-    # Long eq: 100 + 10.05 = 110.05
-    # Short eq: 100 - 10.05 = 89.95
-    # Lev Long: 1000 / 110.05 ~ 9.08
-    # Lev Short: 1000 / 89.95 ~ 11.11
+    # Lev should be 1000/100 = 10
+    assert lev_long[0, 1] == pytest.approx(10.0)
+
+def test_simulate_paths_numba_margin_call():
+    # Test that small move triggers margin call (Default) because MM = IM logic
+    P, T = 1, 2
+    initial_price = 100.0
+    notional = 1000.0
+    im0 = 100.0
+    slippage_factor = 0.0
     
-    vm = dPnL[0, 1]
-    assert lev_long[0, 1] == pytest.approx(notional / (100 + vm))
-    assert lev_short[0, 1] == pytest.approx(notional / (100 - vm))
+    log_returns = np.array([[0.0, 0.01]]) # 1% move
+    pct_returns = np.exp(log_returns) - 1.0
+    
+    margin_mult = np.ones((P, T))
+    
+    (
+        df_required, defaults, price_paths, lev_long, lev_short,
+        liquidation_fraction, notional_path, equity_long, equity_short, df_path, slippage_cost
+    ) = _simulate_paths_numba(
+        log_returns, pct_returns, initial_price, im0, notional, slippage_factor, margin_mult,
+        do_partial_liquidation=False
+    )
+    
+    # 1% move -> PnL ~ 10. EqS ~ 90. Req ~ 100. Shortfall 10.
+    # Full Liquidation.
+    assert defaults[0] == 1
+    assert notional_path[0, 1] == 0.0
+    
+    # With Partial Liquidation
+    (
+        df_required_p, defaults_p, _, _, _,
+        liquidation_fraction_p, notional_path_p, equity_long_p, equity_short_p, _, _
+    ) = _simulate_paths_numba(
+        log_returns, pct_returns, initial_price, im0, notional, slippage_factor, margin_mult,
+        do_partial_liquidation=True
+    )
+    
+    # Shortfall ~ 10. Notional 1000. k = 10/1000 = 0.01.
+    # Should liquidate 1%.
+    # Defaults should be 0 (unless k=1).
+    # k=0.01 < 1. So default=0?
+    # My logic: `if k == 1.0: defaults[p]=1`.
+    # So default should be 0.
+    
+    assert defaults_p[0] == 0
+    assert liquidation_fraction_p[0, 1] == pytest.approx(0.01, rel=0.1) # approx
+    assert notional_path_p[0, 1] == pytest.approx(1000 * 0.99, rel=0.01)

@@ -44,7 +44,10 @@ class SingleModelResults:
 
     # Partial liquidation (HL-like)
     partial_liq_amount: Optional[np.ndarray] = None  # [P, T]
+    liquidation_fraction: Optional[np.ndarray] = None  # [P, T] (k)
     notional_paths: Optional[np.ndarray] = None  # [P, T]
+    df_path: Optional[np.ndarray] = None  # [P, T]
+    slippage_cost: Optional[np.ndarray] = None  # [P, T]
 
     # Equity paths (optional but very useful)
     equity_long: Optional[np.ndarray] = None  # [P, T]

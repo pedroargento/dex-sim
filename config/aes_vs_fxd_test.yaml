@@ -22,3 +22,4 @@ models:
     leverage: 20
     slippage: 0.001
 
+partial_liquidation: true

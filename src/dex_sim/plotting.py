@@ -55,6 +55,12 @@ def plot_all_for_model(model_res, outdir="plots", max_paths=5):
     if model_res.partial_liq_amount is not None:
         plot_partial_liquidation(model_res, d, max_paths)
 
+    if model_res.liquidation_fraction is not None:
+        plot_liquidation_fraction(model_res, d)
+
+    if model_res.notional_paths is not None:
+        plot_notional_paths(model_res, d, max_paths)
+
     if model_res.equity_long is not None:
         plot_equity_paths(model_res, d, max_paths)
 
@@ -304,4 +310,46 @@ def plot_partial_liquidation(model_res, outdir, max_paths=5):
     plt.ylabel("Notional Closed")
     plt.tight_layout()
     plt.savefig(os.path.join(outdir, f"{model_res.name}_partial_liq.png"))
+    plt.close()
+
+
+def plot_liquidation_fraction(model_res, outdir):
+    if model_res.liquidation_fraction is None:
+        return
+
+    plt.figure(figsize=(12, 5))
+    # Use a mask to show only non-zero?
+    # Or just plot. Most are 0.
+    plt.imshow(
+        model_res.liquidation_fraction,
+        aspect="auto",
+        cmap="Reds",
+        interpolation="nearest",
+        vmin=0,
+        vmax=1,
+    )
+    plt.colorbar(label="Liquidation Fraction (k)")
+    plt.title(f"Liquidation Fraction Heatmap — {model_res.name}")
+    plt.xlabel("Time")
+    plt.ylabel("Path")
+    plt.tight_layout()
+    plt.savefig(os.path.join(outdir, f"{model_res.name}_liq_fraction_heatmap.png"))
+    plt.close()
+
+
+def plot_notional_paths(model_res, outdir, max_paths=5):
+    if model_res.notional_paths is None:
+        return
+
+    P, T = model_res.notional_paths.shape
+    paths = min(P, max_paths)
+
+    plt.figure(figsize=(10, 5))
+    for i in range(paths):
+        plt.plot(model_res.notional_paths[i], alpha=0.7)
+    plt.title(f"Notional Decay — sample paths — {model_res.name}")
+    plt.xlabel("Time")
+    plt.ylabel("Notional Position")
+    plt.tight_layout()
+    plt.savefig(os.path.join(outdir, f"{model_res.name}_notional_decay.png"))
     plt.close()

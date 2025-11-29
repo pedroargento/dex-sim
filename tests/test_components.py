@@ -1,0 +1,73 @@
+import pytest
+import numpy as np
+from scipy.stats import t
+from dex_sim.models.components import ES_IM, FixedLeverageIM, Breaker, FullCloseOut, PartialLiquidationHL
+
+def test_es_im_compute():
+    conf = 0.99
+    df = 6
+    sigma_daily = 0.02
+    notional = 1000.0
+    
+    es_im = ES_IM(conf=conf, df=df)
+    
+    # Calculate expected ES factor manually or use a known approximate value
+    # For t-distribution with df=6, 99% VaR is approx 3.143
+    # ES will be higher.
+    
+    t_inv = t.ppf(conf, df)
+    expected_es_factor = (t.pdf(t_inv, df) / (1 - conf)) * ((df + t_inv**2) / (df - 1))
+    expected_im = sigma_daily * expected_es_factor * notional
+    
+    computed_im = es_im.compute(notional, sigma_daily)
+    assert computed_im == pytest.approx(expected_im, rel=1e-5)
+
+def test_fixed_leverage_im_compute():
+    leverage = 10.0
+    notional = 1000.0
+    sigma_daily = 0.02 # Should be ignored
+    
+    fl_im = FixedLeverageIM(leverage=leverage)
+    expected_im = notional / leverage
+    
+    assert fl_im.compute(notional, sigma_daily) == expected_im
+
+def test_breaker_margin_multiplier():
+    breaker = Breaker(soft=1.0, hard=2.0, multipliers=(1.0, 1.5, 2.0))
+    
+    assert breaker.margin_multiplier(0.5) == 1.0
+    assert breaker.margin_multiplier(1.0) == 1.5
+    assert breaker.margin_multiplier(1.5) == 1.5
+    assert breaker.margin_multiplier(2.0) == 2.0
+    assert breaker.margin_multiplier(2.5) == 2.0
+
+def test_full_close_out_df_loss():
+    fco = FullCloseOut(slippage_factor=0.01)
+    notional = 1000.0
+    vm_remaining = 50.0
+    
+    # Loss = vm_remaining + slippage * notional
+    expected_loss = 50.0 + 0.01 * 1000.0
+    
+    assert fco.df_loss(vm_remaining, notional) == expected_loss
+
+def test_partial_liquidation_hl_liquidate():
+    # Test simple case where vm_remaining <= 0
+    pl = PartialLiquidationHL()
+    vm_paid, df_loss, new_notional = pl.liquidate(100, 0, 1000)
+    assert vm_paid == 0.0
+    assert df_loss == 0.0
+    assert new_notional == 1000
+    
+    # Test case with shortfall
+    # vm_remaining = 50, notional = 1000
+    # close_fraction = min(0.2, 50/1000) = 0.05
+    # close_notional = 0.05 * 1000 = 50
+    # vm_paid_extra = 50
+    # new_notional = 950
+    # remaining_shortfall = 50 - 50 = 0
+    # df_loss = 0
+    vm_paid, df_loss, new_notional = pl.liquidate(100, 50, 1000)
+    assert vm_paid == 50.0
+    assert df_loss == 0.0
+    assert new_notional == 950.0

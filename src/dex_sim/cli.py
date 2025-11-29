@@ -1,4 +1,5 @@
 import argparse
+
 from .experiment_manager import (
     run_experiment_from_config,
     list_experiments,
@@ -33,7 +34,9 @@ def main():
     # ------------------------------------------------------------------
     p_cmp = sub.add_parser("compare", help="Compare DF distributions across runs")
     p_cmp.add_argument(
-        "runs", nargs="+", help="Run IDs (directory names under results/)"
+        "runs",
+        nargs="+",
+        help="Run IDs (directory names under results/)",
     )
 
     args = parser.parse_args()

@@ -1,7 +1,6 @@
 import os
 import json
 import yaml
-import time
 from datetime import datetime
 
 import numpy as np
@@ -24,17 +23,16 @@ from .plotting import plot_all_for_model
 # ------------------------------------------------------------
 
 
-def now_id():
+def now_id() -> str:
     return datetime.now().strftime("%Y%m%d_%H%M%S")
 
 
-def ensure_dir(path):
+def ensure_dir(path: str):
     if not os.path.exists(path):
         os.makedirs(path)
 
 
-def discover_runs(root="results"):
-    """Return list of available result directories."""
+def discover_runs(root: str = "results"):
     if not os.path.exists(root):
         return []
     return sorted(d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d)))
@@ -46,7 +44,7 @@ def discover_runs(root="results"):
 
 
 def build_model(mcfg: dict):
-    """Build a RiskModel from YAML config."""
+    """Build a RiskModel from a YAML model config."""
     mtype = mcfg["type"]
 
     if mtype == "AES":
@@ -77,7 +75,7 @@ def build_model(mcfg: dict):
 # ------------------------------------------------------------
 
 
-def run_experiment_from_config(config_file: str, root="results"):
+def run_experiment_from_config(config_file: str, root: str = "results") -> str:
     with open(config_file, "r") as f:
         cfg = yaml.safe_load(f)
 
@@ -86,23 +84,33 @@ def run_experiment_from_config(config_file: str, root="results"):
     outdir = os.path.join(root, rid)
     ensure_dir(outdir)
 
-    # -------------------------
     # Build models
-    # -------------------------
-    models = []
-    for m in cfg["models"]:
-        models.append(build_model(m))
+    models = [build_model(m) for m in cfg["models"]]
 
-    # -------------------------
-    # Extract simulation params
-    # -------------------------
+    # Simulation parameters
     num_paths = cfg.get("paths", 5000)
     initial_price = cfg.get("initial_price", 4000.0)
-    total_oi = cfg.get("total_oi", 1_000_000_000.0)
-    oi_fraction = cfg.get("oi_fraction", 0.40)
     stress_factor = cfg.get("stress_factor", 1.0)
     seed = cfg.get("seed", 42)
     garch_params = cfg.get("garch_params", "garch_params.json")
+
+    # Notional: NEW API
+    notional = cfg.get("notional")
+    if notional is None:
+        # Backward compatibility: allow total_oi * oi_fraction, but warn
+        total_oi = cfg.get("total_oi")
+        oi_fraction = cfg.get("oi_fraction")
+        if total_oi is not None and oi_fraction is not None:
+            print(
+                "[WARN] `total_oi` + `oi_fraction` are deprecated. "
+                "Please specify `notional` directly in the config."
+            )
+            notional = float(total_oi) * float(oi_fraction)
+        else:
+            raise ValueError(
+                "Config must include `notional` (position size). "
+                "Old `total_oi`+`oi_fraction` interface is deprecated."
+            )
 
     np.random.seed(seed)
 
@@ -111,25 +119,21 @@ def run_experiment_from_config(config_file: str, root="results"):
     print(f"Run ID: {rid}")
     print(f"Models: {[m.name for m in models]}")
     print(f"Paths: {num_paths}")
+    print(f"Notional per side: {notional:,.0f}")
     print(f"Stress factor: {stress_factor}")
     print()
 
-    # -------------------------
     # Run simulation
-    # -------------------------
     results = run_models_numba(
         models=models,
         num_paths=num_paths,
         initial_price=initial_price,
-        total_oi=total_oi,
-        whale_oi_fraction=oi_fraction,
+        notional=notional,
         stress_factor=stress_factor,
         garch_params_file=garch_params,
     )
 
-    # -------------------------
     # Save results + metadata
-    # -------------------------
     print(f"Saving results → {outdir}")
     save_results(results, outdir)
 
@@ -165,29 +169,32 @@ def plot_experiment(run_dir: str):
 # ------------------------------------------------------------
 
 
-def compare_experiments(runs: list, root="results"):
+def compare_experiments(runs: list[str], root: str = "results"):
     loaded = {}
     for rd in runs:
         path = os.path.join(root, rd)
         print(f"Loading {path}...")
         loaded[rd] = load_results(path)
 
-    # Compare DF distributions for matching model names
     import matplotlib.pyplot as plt
+    import seaborn as sns
 
-    for model_name in loaded[runs[0]].models.keys():
+    # Compare DF distributions for matching model names
+    base_run = runs[0]
+    for model_name in loaded[base_run].models.keys():
         plt.figure(figsize=(8, 5))
         for rd in runs:
             df = loaded[rd].models[model_name].df_required
-            sns = __import__("seaborn")
-            sns.histplot(df, label=rd, kde=False, stat="density")
+            sns.histplot(df, label=rd, kde=False, stat="density", alpha=0.6, bins=50)
 
         plt.legend()
         plt.title(f"DF Distribution Comparison — Model: {model_name}")
         plt.xlabel("DF Required ($)")
         plt.tight_layout()
-        plt.savefig(os.path.join(root, f"compare_{model_name}.png"))
+        outpath = os.path.join(root, f"compare_{model_name}.png")
+        plt.savefig(outpath)
         plt.close()
+        print(f"Saved comparison plot for {model_name} → {outpath}")
 
     print("Comparison plots saved.")
 
@@ -197,7 +204,7 @@ def compare_experiments(runs: list, root="results"):
 # ------------------------------------------------------------
 
 
-def list_experiments(root="results"):
+def list_experiments(root: str = "results"):
     runs = discover_runs(root)
     print("\n=== Available Experiment Runs ===")
     if not runs:

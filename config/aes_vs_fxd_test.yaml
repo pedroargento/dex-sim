@@ -1,25 +1,31 @@
 name: aes_vs_fxd_test
-
 paths: 5000
 initial_price: 4000
-total_oi: 1000000000
-oi_fraction: 0.40
+notional: 400000000
 stress_factor: 1.0
-seed: 42
 garch_params: garch_params.json
 
 models:
-  - type: AES
-    name: AES_es99
-    im_conf: 0.99
-    slippage: 0.001
-    breaker_soft: 1.0
-    breaker_hard: 2.0
-    breaker_mult: [1.0, 1.5, 2.0]
+  - name: AES_es99
+    im:
+      type: es
+      conf: 0.99
+    breaker:
+      soft: 1.0
+      hard: 2.0
+      multipliers: [1.0, 1.5, 2.0]
+    liquidation:
+      type: partial
+      slippage: 0.001
 
-  - type: FXD
-    name: FXD_20x
-    leverage: 20
-    slippage: 0.001
-
-partial_liquidation: true
+  - name: FXD_20x
+    im:
+      type: fixed_leverage
+      leverage: 20
+    breaker:
+      soft: .inf
+      hard: .inf
+      multipliers: [1.0, 1.0, 1.0]
+    liquidation:
+      type: full
+      slippage: 0.001

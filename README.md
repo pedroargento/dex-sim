@@ -8,13 +8,13 @@ It is designed for speed, accuracy, and flexibility, allowing researchers and de
 
 `dex-sim` simulates the financial risk dynamics of a perpetual futures exchange operating under a CCP model. The core of the project is a powerful Monte Carlo engine that generates thousands of market scenarios to assess how different risk models perform.
 
-- **Risk Modeling**: Supports multiple pluggable risk models, including the innovative **Adaptive Exposure System (AES)**, traditional **Fixed Leverage (FXD)**, and easily extensible custom models.
+- **Risk Modeling**: Supports fully modular component-based risk models (IM, Breaker, Liquidation).
 - **High-Performance Engine**: Utilizes a **Numba-accelerated** Monte Carlo engine to simulate thousands of price paths with GARCH-based volatility models, ensuring both speed and realism.
 - **Systemic Stress Testing**: Models complex dynamics like circuit breakers, dynamic margin adjustments, and default fund consumption.
 
 ## Features
 
-- **Pluggable Risk Models**: Easily define and switch between different margin and liquidation systems.
+- **Pluggable Risk Models**: Build models by composing Initial Margin, Breaker, and Liquidation components.
 - **Numba-Powered Monte Carlo**: Blazing fast 🔥 simulation core JIT-compiled with Numba.
 - **Systemic Stress Index (Rₜ)**: A composite index that tracks real-time market stress by combining volatility, liquidity, and return shocks.
 - **Circuit Breakers**: Implements a multi-state (NORMAL, SOFT, HARD) circuit breaker that dynamically adjusts margin multipliers in response to Rₜ.
@@ -27,114 +27,166 @@ It is designed for speed, accuracy, and flexibility, allowing researchers and de
     - `dex-sim plot`: Generate a full suite of plots for a given run.
     - `dex-sim compare`: Compare key metrics across multiple runs.
 
-## Installation
+## Risk Model Architecture (Component-Based)
 
-Get up and running in a few simple steps. `dex-sim` uses `uv` for fast and reliable dependency management.
+`dex-sim` uses a fully modular architecture. There is only one `RiskModel` class. A model is simply a composition of three pluggable components defined in YAML:
 
-```bash
-# 1. Clone the repository
-git clone https://github.com/your-username/dex-sim.git
+1.  **Initial Margin (IM)**: Determines the base margin requirement (e.g., `ES_IM` for dynamic risk, `FixedLeverageIM` for constant leverage).
+2.  **Breaker**: A Finite State Machine that monitors systemic stress ($R_t$) and applies multipliers to the IM requirement.
+3.  **Liquidation**: Defines how positions are closed when margin is breached (e.g., `FullCloseOut`, `PartialCloseOut`).
 
-# 2. Navigate to the project directory
-cd dex-sim
+This architecture allows you to simulate almost any exchange design without writing new Python code.
 
-# 3. Install in editable mode
-uv pip install -e .
-```
+## YAML Model Specification
 
-## Quick Start
-
-Running simulations and analyzing results is simple with the built-in CLI.
-
-**1. Run an Experiment**
-
-Experiments are defined in YAML files. A sample configuration is provided in `config/aes_vs_fxd_test.yaml`.
-
-```bash
-dex-sim run config/aes_vs_fxd_test.yaml
-```
-This command will run the simulation, save the results, and generate plots.
-
-**2. List Simulation Runs**
-
-You can list all the completed simulation runs stored in the `results/` directory.
-
-```bash
-dex-sim list
-```
-
-**3. Plot Results**
-
-Generate plots for a specific run using its unique ID.
-
-```bash
-dex-sim plot results/<run_id>
-```
-
-## Experiment Configuration
-
-Experiments are defined in a simple YAML format, allowing you to configure the simulation parameters and the risk models to be tested.
-
-Here is a working example from `config/aes_vs_fxd_test.yaml`:
+Models are defined in the `models` list of your experiment configuration file.
 
 ```yaml
-name: aes_vs_fxd_test
-paths: 5000
-initial_price: 4000
+models:
+  - name: MyCustomModel
+    im:
+      type: es              # 'es' or 'fixed_leverage'
+      conf: 0.99            # Component-specific params
+    breaker:
+      soft: 1.0             # Trigger threshold for Soft state
+      hard: 2.0             # Trigger threshold for Hard state
+      multipliers: [1.0, 1.5, 2.0]  # [Normal, Soft, Hard] multipliers
+    liquidation:
+      type: partial         # 'full' or 'partial'
+      slippage: 0.001
+```
+
+**Defaults:**
+*   If `breaker` is omitted: Infinite thresholds (never triggers), multipliers `[1, 1, 1]`.
+*   If `liquidation` is omitted: `type: full`, `slippage: 0.001`.
+
+### Example 1: CCP-Like Model (Cartesi CCP)
+Uses dynamic Expected Shortfall margin, an active circuit breaker, and partial liquidation to mitigate cascades.
+
+```yaml
+models:
+  - name: CCP_ES99
+    im:
+      type: es
+      conf: 0.99
+    breaker:
+      soft: 0.40
+      hard: 0.70
+      multipliers: [1.0, 1.1, 1.25]
+    liquidation:
+      type: partial
+      slippage: 0.001
+```
+
+### Example 2: Hyperliquid-Style Fixed-Leverage Model
+Simple constant leverage, no breaker, full liquidation on bankruptcy.
+
+```yaml
+models:
+  - name: Hyperliquid_20x
+    im:
+      type: fixed_leverage
+      leverage: 20
+    breaker:
+      soft: .inf
+      hard: .inf
+      multipliers: [1, 1, 1]
+    liquidation:
+      type: full
+      slippage: 0.001
+```
+
+### Example 3: Synthetic CFD Model
+Fixed leverage baseline but with a system-wide breaker to hike margins during volatility, plus partial liquidation.
+
+```yaml
+models:
+  - name: Synthetic_CFD
+    im:
+      type: fixed_leverage
+      leverage: 10
+    breaker:
+      soft: 0.5
+      hard: 0.9
+      multipliers: [1.0, 1.2, 1.4]
+    liquidation:
+      type: partial
+      slippage: 0.002
+```
+
+### Example 4: GMX-Style GLP Model (Delta-Neutral Liquidity)
+Simulates a liquidity pool model where traders have effectively infinite initial leverage (no IM check at open), and liquidation is purely based on equity depletion. No breaker logic.
+
+```yaml
+models:
+  - name: GMX_GLP
+    im:
+      type: fixed_leverage
+      leverage: 1000000     # Effectively no IM check
+    breaker:
+      soft: .inf
+      hard: .inf
+      multipliers: [1, 1, 1]
+    liquidation:
+      type: full
+      slippage: 0.001
+```
+
+### Example 5: DYDX-v4-Style Model
+Orderbook-like leverage with a mild breaker regime.
+
+```yaml
+models:
+  - name: DYDX_v4
+    im:
+      type: es
+      conf: 0.95
+    breaker:
+      soft: 0.8
+      hard: .inf
+      multipliers: [1.0, 1.05, 1.05]
+    liquidation:
+      type: full
+      slippage: 0.0005
+```
+
+## Extending Models
+
+You can add new components by creating a Python class and registering it in `experiment_manager.py`.
+
+1.  **New IM Strategy**: Subclass `InitialMargin` in `models/components.py`. Implement `compute(notional, sigma)`.
+2.  **New Liquidation Logic**: Subclass `LiquidationStrategy`.
+3.  **Register**: Update the `build_im`, `build_breaker`, or `build_liquidation` functions in `src/dex_sim/experiment_manager.py` to handle your new `type` string.
+
+No subclassing of `RiskModel` is required.
+
+## Full End-to-End Example Config
+
+```yaml
+name: multi_risk_test
+paths: 10000
+initial_price: 1800
 notional: 400000000
 stress_factor: 1.0
+seed: 123
 garch_params: garch_params.json
 
 models:
-  - type: AES
-    name: AES_es99
-    im_conf: 0.99
-    slippage: 0.001
-    breaker_soft: 1.0
-    breaker_hard: 2.0
-    breaker_mult: [1.0, 1.5, 2.0]
+  - name: CCP
+    im: { type: es, conf: 0.99 }
+    breaker: { soft: 0.4, hard: 0.7, multipliers: [1.0, 1.1, 1.25] }
+    liquidation: { type: partial }
 
-  - type: FXD
-    name: FXD_20x
-    leverage: 20
-    slippage: 0.001
+  - name: HL_20x
+    im: { type: fixed_leverage, leverage: 20 }
+    breaker: { soft: .inf, hard: .inf, multipliers: [1,1,1] }
+    liquidation: { type: full }
+
+  - name: Synthetic_10x
+    im: { type: fixed_leverage, leverage: 10 }
+    breaker: { soft: 0.5, hard: 0.9, multipliers: [1.0,1.2,1.4] }
+    liquidation: { type: partial }
 ```
-
-## Risk Models
-
-`dex-sim` supports different risk models, each with its own approach to margining and liquidation.
-
-### AES (Adaptive Exposure System)
-
-The **AES** model implements a dynamic margining system. Initial Margin is based on a high-confidence **Expected Shortfall (ES)** of future returns. During the simulation, the system responds to market stress (measured by **Rₜ**) by activating circuit breaker regimes (SOFT, HARD) that increase margin multipliers, automatically tightening leverage when risk is high.
-
-### FXD (Fixed Leverage)
-
-The **FXD** model represents a traditional exchange where traders are offered a fixed leverage level (e.g., 20x). This model serves as a baseline to demonstrate the performance of adaptive models like AES under stress.
-
-### Slippage and Closeout
-
-Both models use a **Full Closeout** liquidation mechanism. When a default occurs, the model assumes the entire position is closed at a cost, which is modeled as a `slippage_factor` applied to the position's notional value. This cost is drawn from the default fund.
-
-## Simulation Engine
-
-The heart of `dex-sim` is its Numba JIT-compiled simulation core.
-
-- **Numba JIT Core**: The core loop is written in a way that allows Numba to translate it into highly efficient machine code, enabling the simulation of millions of timesteps in seconds.
-- **2-Trader Symmetric Accounting**: The simulation simplifies the market into a symmetric two-trader model (one long, one short) with equal notional exposure. Variation Margin (VM) is calculated as the PnL transfer between them.
-- **Default Fund Logic**: If a trader's equity is insufficient to cover their losses (VM), they default. The remaining loss, plus slippage, is covered by the Default Fund (DF).
-- **Dynamic Margins**: For adaptive models like AES, the systemic risk index **Rₜ** is calculated at each timestep. If Rₜ crosses the breaker thresholds, the margin multipliers are increased for that path, affecting the amount of capital drawn from the DF in a default.
-
-##  Using the Results
-
-All simulation outputs are saved to `results/<run_id>/data.zarr`, where `<run_id>` is a timestamped identifier for your experiment. The Zarr format allows for efficient storage and retrieval of large numerical arrays.
-
-The output data includes:
-- `price_paths`: The simulated price for each path and timestep.
-- `df_required`: The total amount required from the Default Fund for each path.
-- `leverage`: The effective leverage for the long and short trader at each timestep.
-- `breaker_state`: An integer (0, 1, or 2) indicating the circuit breaker state (NORMAL, SOFT, HARD) at each timestep.
-- `rt`: The value of the systemic risk index Rₜ at each timestep.
 
 ## 📑 Simulation Summary & Reporting
 
@@ -142,7 +194,7 @@ The output data includes:
 
 ### Purpose
 - Aggregates all numerical risk metrics derived from `SimulationResults`.
-- Provides a standardized "scorecard" for comparing model performance (e.g., AES vs FXD).
+- Provides a standardized "scorecard" for comparing model performance.
 - Saved automatically to: `results/<run_id>/summary.md`.
 
 ### Manual Generation
@@ -172,11 +224,11 @@ The summary report includes the following data-derived metrics, grouped by categ
 *   **Max Peak Leverage**: The highest single leverage value observed in any path/timestep.
 *   **Time > 20x/50x**: Percentage of simulation time where leverage exceeded 20x or 50x.
 
-#### 3) Systemic Stress Metrics (Rₜ) (AES Only)
+#### 3) Systemic Stress Metrics (Rₜ)
 *   **Mean/Max Rₜ**: Average and peak values of the systemic risk index.
 *   **Rₜ Volatility**: Standard deviation of the risk index.
 
-#### 4) Breaker Metrics (AES Only)
+#### 4) Breaker Metrics
 *   **Regime Occupancy**: Percentage of time spent in `NORMAL`, `SOFT`, and `HARD` breaker states.
 *   **Mean Margin Multiplier**: The average multiplier applied to Initial Margin requirements.
 
@@ -232,7 +284,6 @@ Below is a guide to the charts produced by the suite and how to interpret them f
 **Interpretation:**
 *   **The Curve:** Shows the probability (Y-axis) that a loss will exceed a certain amount (X-axis).
 *   **The Tail:** A straight line on this log-log plot indicates "heavy tails" (power-law distribution), meaning catastrophic losses are more likely than a standard bell curve predicts.
-*   **AES vs FXD:** Compare the tails. Does AES drop off faster (safer) or does it have the same extreme tail risk as FXD?
 
 #### 2. Model Comparison Violins 🎻
 **What it is:** Side-by-side violin plots comparing the density of losses between models.
@@ -325,143 +376,6 @@ dex-sim plot results/20231129_120000_aes_vs_fxd
 
 **4. Customizing Plots**
 To add new plots, edit `src/dex_sim/plotting.py`. The `plot_all` function drives the generation process. Any new function added there will automatically be included in the workflow.
-
-## Creating and Running Custom Models
-
-`dex-sim` is built to be extensible. You can easily create, configure, and run your own risk models. Here’s a step-by-step guide.
-
-### 1. Define Your Custom Model
-
-First, create a new Python file in the `src/dex_sim/models/` directory (e.g., `my_model.py`). Inside this file, define your model as a class that inherits from `RiskModel`.
-
-Your class must:
-1.  Inherit from `dex_sim.models.base.RiskModel`.
-2.  Implement the `initial_margin(self, notional: float, sigma: float) -> float` method via a component.
-3.  Accept a `name` argument in its `__init__` method and pass it to the parent class.
-
-You can also add other components like `breaker` or `liquidation` logic, and accept custom parameters in `__init__`.
-
-**Example: `src/dex_sim/models/my_model.py`**
-
-Let's create a `SimpleVaRModel` that calculates Initial Margin based on a Value-at-Risk (VaR) formula with a configurable confidence level and scaling factor.
-
-```python
-# src/dex_sim/models/my_model.py
-
-from .base import RiskModel, IM_Component, Liquidation_Component
-
-class SimpleVaR_IM(IM_Component):
-    """A simple VaR-based Initial Margin component."""
-    def __init__(self, var_conf: float = 0.99, scaler: float = 1.2):
-        self.var_conf = var_conf
-        self.scaler = scaler
-
-    def initial_margin(self, notional: float, sigma: float) -> float:
-        # A simplified VaR-like calculation
-        # Z-score for 99% confidence is approx 2.33
-        z_score = 2.33 
-        margin = z_score * sigma * notional
-        return self.scaler * margin
-
-class SimpleVaRModel(RiskModel):
-    """
-    A custom risk model using our SimpleVaR IM component.
-    """
-    def __init__(self, name: str, im: IM_Component, liquidation: Liquidation_Component):
-        super().__init__(name=name, im=im, liquidation=liquidation)
-
-```
-
-### 2. Register Your Model
-
-To make your model accessible to the experiment runner, you need to register it.
-
-Open `src/dex_sim/experiment_manager.py` and:
-1.  Import your new model class (`SimpleVaRModel`) and its components (`SimpleVaR_IM`).
-2.  Add your model's `type` name to the `MODELS` dictionary, mapping it to your class.
-3.  Add your new `IM_Component` to the `IM_COMPONENTS` dictionary.
-
-**Example: `src/dex_sim/experiment_manager.py`**
-
-```python
-# ... other imports
-from .models.aes import AESModel
-from .models.fxd import FXDModel
-# Import your new model and its components
-from .models.my_model import SimpleVaRModel, SimpleVaR_IM 
-
-# ...
-
-# Add your model to the MODELS dictionary
-MODELS = {
-    "AES": AESModel,
-    "FXD": FXDModel,
-    "SimpleVaR": SimpleVaRModel, # <-- Register your new model class
-}
-
-# Add your IM component to the IM_COMPONENTS dictionary
-IM_COMPONENTS = {
-    "ES": ES_IM,
-    "FixedLeverage": FixedLeverageIM,
-    "SimpleVaR": SimpleVaR_IM, # <-- Register your new IM component class
-}
-
-# ...
-```
-*Note: This registration step is required to map the string `type` from the YAML file to the actual Python class.*
-
-### 3. Configure Your Experiment
-
-Now you can use your `SimpleVaR` model in a YAML experiment file. Create a new configuration or modify an existing one (e.g., `config/my_experiment.yaml`).
-
-In the `models` section, add a new entry with `type: SimpleVaR`. You can configure the parameters you defined in `SimpleVaR_IM` (`var_conf` and `scaler`) and `FullCloseOut` (`slippage`) directly. The experiment manager will automatically construct the objects.
-
-**Example: `config/my_experiment.yaml`**
-
-```yaml
-name: custom_var_vs_aes
-paths: 10000
-initial_price: 4000
-notional: 400000000
-stress_factor: 1.2
-garch_params: garch_params.json
-
-models:
-  # Your custom model configuration
-  - type: SimpleVaR
-    name: SimpleVaR_99
-    slippage: 0.001
-    im:
-      type: SimpleVaR # Specify the IM component type
-      var_conf: 0.99
-      scaler: 1.25
-
-  # An AES model for comparison
-  - type: AES
-    name: AES_es99
-    im_conf: 0.99
-    slippage: 0.001
-    breaker_soft: 1.0
-    breaker_hard: 2.0
-    breaker_mult: [1.0, 1.5, 2.0]
-```
-
-### 4. Run and Analyze
-
-Finally, run your new experiment using the CLI and analyze the results.
-
-```bash
-# Run the simulation with your custom model
-dex-sim run config/my_experiment.yaml
-
-# List the run
-dex-sim list
-
-# Plot the results for your specific experiment
-dex-sim plot results/run_<run_id_of_your_experiment>
-```
-
-Your custom model's performance will be simulated, saved, and plotted alongside any other models you included in the experiment, allowing for direct comparison.
 
 ## Development Setup
 

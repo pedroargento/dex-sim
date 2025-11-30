@@ -7,12 +7,12 @@ import numpy as np
 
 from .engine import run_models_numba
 from .models import (
-    AESModel,
-    FXDModel,
+    RiskModel,
     ES_IM,
     FixedLeverageIM,
     Breaker,
     FullCloseOut,
+    PartialCloseOut,
 )
 from .results_io import save_results, load_results
 from .plotting import plot_all
@@ -40,35 +40,48 @@ def discover_runs(root: str = "results"):
 
 
 # ------------------------------------------------------------
+# Component Builders
+# ------------------------------------------------------------
+
+def build_im(cfg):
+    t = cfg.get("type")
+    if t == "es":
+        return ES_IM(conf=cfg.get("conf", 0.99))
+    elif t == "fixed_leverage":
+        return FixedLeverageIM(leverage=cfg.get("leverage", 1.0))
+    else:
+        raise ValueError(f"Unknown IM type: {t}")
+
+def build_breaker(cfg):
+    # Default to infinite limits (no breaker) if not specified
+    return Breaker(
+        soft = float(cfg.get("soft", float("inf"))),
+        hard = float(cfg.get("hard", float("inf"))),
+        multipliers = tuple(cfg.get("multipliers", [1.0, 1.0, 1.0])),
+    )
+
+def build_liquidation(cfg):
+    t = cfg.get("type", "full")
+    if t == "full":
+        return FullCloseOut(slippage_factor=cfg.get("slippage", 0.001))
+    elif t == "partial":
+        return PartialCloseOut(slippage_factor=cfg.get("slippage", 0.001))
+    else:
+        raise ValueError(f"Unknown liquidation type: {t}")
+
+# ------------------------------------------------------------
 # Model factory (reads YAML model definitions)
 # ------------------------------------------------------------
 
 
 def build_model(mcfg: dict):
     """Build a RiskModel from a YAML model config."""
-    mtype = mcfg["type"]
-
-    if mtype == "AES":
-        return AESModel(
-            name=mcfg.get("name", "AES"),
-            im=ES_IM(conf=mcfg.get("im_conf", 0.99)),
-            breaker=Breaker(
-                soft=mcfg.get("breaker_soft", 1.0),
-                hard=mcfg.get("breaker_hard", 2.0),
-                multipliers=tuple(mcfg.get("breaker_mult", [1.0, 1.5, 2.0])),
-            ),
-            liquidation=FullCloseOut(slippage_factor=mcfg.get("slippage", 0.001)),
-        )
-
-    elif mtype == "FXD":
-        return FXDModel(
-            name=mcfg.get("name", f"FXD_{mcfg['leverage']}x"),
-            im=FixedLeverageIM(leverage=mcfg["leverage"]),
-            liquidation=FullCloseOut(slippage_factor=mcfg.get("slippage", 0.001)),
-        )
-
-    else:
-        raise ValueError(f"Unknown model type: {mtype}")
+    return RiskModel(
+        name = mcfg["name"],
+        im = build_im(mcfg["im"]),
+        breaker = build_breaker(mcfg.get("breaker", {})),
+        liquidation = build_liquidation(mcfg.get("liquidation", {})),
+    )
 
 
 # ------------------------------------------------------------
@@ -113,7 +126,8 @@ def run_experiment_from_config(config_file: str, root: str = "results") -> str:
                 "Old `total_oi`+`oi_fraction` interface is deprecated."
             )
 
-    partial_liquidation = cfg.get("partial_liquidation", False)
+    # partial_liquidation is no longer a global flag
+    # It is determined per-model by its liquidation component
 
     np.random.seed(seed)
 
@@ -124,7 +138,6 @@ def run_experiment_from_config(config_file: str, root: str = "results") -> str:
     print(f"Paths: {num_paths}")
     print(f"Notional per side: {notional:,.0f}")
     print(f"Stress factor: {stress_factor}")
-    print(f"Partial Liquidation: {partial_liquidation}")
     print()
 
     # Run simulation
@@ -135,7 +148,6 @@ def run_experiment_from_config(config_file: str, root: str = "results") -> str:
         notional=notional,
         stress_factor=stress_factor,
         garch_params_file=garch_params,
-        partial_liquidation=partial_liquidation,
     )
 
     # Save results + metadata

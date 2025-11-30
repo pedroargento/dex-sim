@@ -1,7 +1,7 @@
 import pytest
 import numpy as np
 from scipy.stats import t
-from dex_sim.models.components import ES_IM, FixedLeverageIM, Breaker, FullCloseOut, PartialLiquidationHL
+from dex_sim.models.components import ES_IM, FixedLeverageIM, Breaker, FullCloseOut, PartialCloseOut
 
 def test_es_im_compute():
     conf = 0.99
@@ -10,10 +10,6 @@ def test_es_im_compute():
     notional = 1000.0
     
     es_im = ES_IM(conf=conf, df=df)
-    
-    # Calculate expected ES factor manually or use a known approximate value
-    # For t-distribution with df=6, 99% VaR is approx 3.143
-    # ES will be higher.
     
     t_inv = t.ppf(conf, df)
     expected_es_factor = (t.pdf(t_inv, df) / (1 - conf)) * ((df + t_inv**2) / (df - 1))
@@ -51,23 +47,6 @@ def test_full_close_out_df_loss():
     
     assert fco.df_loss(vm_remaining, notional) == expected_loss
 
-def test_partial_liquidation_hl_liquidate():
-    # Test simple case where vm_remaining <= 0
-    pl = PartialLiquidationHL()
-    vm_paid, df_loss, new_notional = pl.liquidate(100, 0, 1000)
-    assert vm_paid == 0.0
-    assert df_loss == 0.0
-    assert new_notional == 1000
-    
-    # Test case with shortfall
-    # vm_remaining = 50, notional = 1000
-    # close_fraction = min(0.2, 50/1000) = 0.05
-    # close_notional = 0.05 * 1000 = 50
-    # vm_paid_extra = 50
-    # new_notional = 950
-    # remaining_shortfall = 50 - 50 = 0
-    # df_loss = 0
-    vm_paid, df_loss, new_notional = pl.liquidate(100, 50, 1000)
-    assert vm_paid == 50.0
-    assert df_loss == 0.0
-    assert new_notional == 950.0
+def test_partial_close_out_init():
+    pco = PartialCloseOut(slippage_factor=0.005)
+    assert pco.slippage_factor == 0.005

@@ -64,14 +64,15 @@ class Breaker:
 
 # ---------- Liquidation strategies ----------
 
+class LiquidationStrategy:
+    slippage_factor: float = 0.001
 
 @dataclass
-class FullCloseOut:
+class FullCloseOut(LiquidationStrategy):
     """
     Full close-out of remaining position, with a simple slippage cost.
     """
-
-    slippage_factor: float = 0.001  # fraction of notional
+    slippage_factor: float = 0.001
 
     def df_loss(self, vm_remaining: float, notional: float) -> float:
         """
@@ -82,42 +83,11 @@ class FullCloseOut:
 
 
 @dataclass
-class PartialLiquidationHL:
+class PartialCloseOut(LiquidationStrategy):
     """
-    Hyperliquid-like partial liquidation.
-
-    This is a simplified placeholder:
-    - Tries to pay VM from loser equity.
-    - If not enough, closes fraction of position to plug gap,
-      up to full close-out.
+    Partial liquidation strategy.
     """
-
-    maintenance_factor: float = 0.005  # e.g. 0.5% MM
-
-    def liquidate(
-        self,
-        equity_loser: float,
-        vm_remaining: float,
-        notional: float,
-    ) -> tuple[float, float, float]:
-        """
-        Returns:
-            vm_paid_extra  (via position closeout),
-            df_loss        (if still undercollateralized),
-            new_notional   (after partial/full closeout)
-        """
-        # Toy implementation: close a fraction proportional to shortfall:
-        if vm_remaining <= 0:
-            return 0.0, 0.0, notional
-
-        # close up to 20% of notional each liquidation attempt
-        close_fraction = min(0.2, vm_remaining / notional)
-        close_notional = close_fraction * notional
-
-        vm_paid_extra = close_notional  # assume mark-to-market at par for simplicity
-        new_notional = notional - close_notional
-
-        remaining_shortfall = vm_remaining - vm_paid_extra
-        df_loss = max(0.0, remaining_shortfall)
-
-        return vm_paid_extra, df_loss, new_notional
+    slippage_factor: float = 0.001
+    
+    # Placeholder for any specific partial logic if needed outside Numba
+    # In this architecture, the Numba engine handles the 'how' based on type check or flag

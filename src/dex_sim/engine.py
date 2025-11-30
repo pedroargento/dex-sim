@@ -4,7 +4,7 @@ from numba import njit
 
 from .mc_generator import MCReturnsGenerator
 from .data_structures import MultiModelResults, SingleModelResults
-from .models import RiskModel, AESModel, FXDModel, FullCloseOut
+from .models import RiskModel, FullCloseOut, PartialCloseOut
 
 
 # ============================================================
@@ -364,7 +364,6 @@ def run_models_numba(
     notional: float = 400_000_000.0,
     stress_factor: float = 1.0,
     garch_params_file: str = "garch_params.json",
-    partial_liquidation: bool = False,
 ) -> MultiModelResults:
     """
     Ultra-fast Monte-Carlo engine.
@@ -395,34 +394,25 @@ def run_models_numba(
         im0 = model.initial_margin(notional, sigma_daily)
 
         # Slippage factor (for DF requirement when default occurs)
-        slippage = 0.0
-        liquidation = getattr(model, "liquidation", None)
-        if isinstance(liquidation, FullCloseOut):
-            slippage = liquidation.slippage_factor
+        slippage = model.liquidation.slippage_factor
+        
+        # Check if partial liquidation is enabled based on component type
+        do_partial = isinstance(model.liquidation, PartialCloseOut)
 
-        # AES: dynamic breaker
-        if isinstance(model, AESModel):
-            breaker = getattr(model, "breaker", None)
-            if breaker is not None:
-                soft = float(breaker.soft)
-                hard = float(breaker.hard)
-                mults = tuple(float(x) for x in breaker.multipliers)
-            else:
-                soft, hard, mults = 1.0, 2.0, (1.0, 1.5, 2.0)
+        # Breaker: get params from model.breaker
+        # Even FXD has a Breaker component (defaults to infinite soft/hard)
+        soft = model.breaker.soft
+        hard = model.breaker.hard
+        mults = model.breaker.multipliers
 
-            rt, breaker_state, margin_mult = _build_rt_and_mult(
-                log_returns=log_returns,
-                amihud_le=amihud_le,
-                sigmas=sigmas,
-                breaker_soft=soft,
-                breaker_hard=hard,
-                breaker_multipliers=mults,
-            )
-        else:
-            # FXD and others: no breaker effect
-            rt = np.zeros_like(log_returns, dtype=np.float64)
-            breaker_state = np.zeros_like(log_returns, dtype=np.int8)
-            margin_mult = np.ones_like(log_returns, dtype=np.float64)
+        rt, breaker_state, margin_mult = _build_rt_and_mult(
+            log_returns=log_returns,
+            amihud_le=amihud_le,
+            sigmas=sigmas,
+            breaker_soft=soft,
+            breaker_hard=hard,
+            breaker_multipliers=mults,
+        )
 
         # Run numba kernel
         (
@@ -445,7 +435,7 @@ def run_models_numba(
             notional=notional,
             slippage_factor=slippage,
             margin_mult=margin_mult,
-            do_partial_liquidation=partial_liquidation,
+            do_partial_liquidation=do_partial,
         )
 
         model_results[model.name] = SingleModelResults(

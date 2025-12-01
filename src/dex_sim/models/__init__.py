@@ -6,5 +6,6 @@ from .components import (
     Breaker, 
     FullCloseOut, 
     PartialCloseOut,
-    LiquidationStrategy
+    LiquidationStrategy,
+    TraderArrival
 )

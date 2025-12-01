@@ -5,7 +5,7 @@ from datetime import datetime
 
 import numpy as np
 
-from .engine import run_models_numba
+from .engine import run_models
 from .models import (
     RiskModel,
     ES_IM,
@@ -13,6 +13,7 @@ from .models import (
     Breaker,
     FullCloseOut,
     PartialCloseOut,
+    TraderArrival,
 )
 from .results_io import save_results, load_results
 from .plotting import plot_all
@@ -61,26 +62,75 @@ def build_breaker(cfg):
     )
 
 def build_liquidation(cfg):
+
     t = cfg.get("type", "full")
+
     if t == "full":
+
         return FullCloseOut(slippage_factor=cfg.get("slippage", 0.001))
+
     elif t == "partial":
+
         return PartialCloseOut(slippage_factor=cfg.get("slippage", 0.001))
+
     else:
+
         raise ValueError(f"Unknown liquidation type: {t}")
 
+
+
+
+
+def build_trader_arrival(cfg):
+
+    return TraderArrival(
+
+        enabled=cfg.get("enabled", False),
+
+        pairs_per_tick=cfg.get("pairs_per_tick", 0),
+
+        notional_distribution=cfg.get("notional_distribution", "lognormal"),
+
+        notional_dist_params=cfg.get("notional_dist_params", {}),
+
+        equity_distribution=cfg.get("equity_distribution", "fixed"),
+
+        equity_dist_params=cfg.get("equity_dist_params", {}),
+
+        leverage_range=tuple(cfg.get("leverage_range", [2.0, 10.0])),
+
+    )
+
+
+
+
+
 # ------------------------------------------------------------
+
 # Model factory (reads YAML model definitions)
+
 # ------------------------------------------------------------
+
+
+
 
 
 def build_model(mcfg: dict):
+
     """Build a RiskModel from a YAML model config."""
+
     return RiskModel(
-        name = mcfg["name"],
-        im = build_im(mcfg["im"]),
-        breaker = build_breaker(mcfg.get("breaker", {})),
-        liquidation = build_liquidation(mcfg.get("liquidation", {})),
+
+        name=mcfg["name"],
+
+        im=build_im(mcfg["im"]),
+
+        breaker=build_breaker(mcfg.get("breaker", {})),
+
+        liquidation=build_liquidation(mcfg.get("liquidation", {})),
+
+        trader_arrival=build_trader_arrival(mcfg.get("trader_arrival", {})),
+
     )
 
 
@@ -141,7 +191,7 @@ def run_experiment_from_config(config_file: str, root: str = "results") -> str:
     print()
 
     # Run simulation
-    results = run_models_numba(
+    results = run_models(
         models=models,
         num_paths=num_paths,
         initial_price=initial_price,

@@ -16,6 +16,7 @@ It is designed for speed, accuracy, and flexibility, allowing researchers and de
 
 - **Pluggable Risk Models**: Build models by composing Initial Margin, Breaker, and Liquidation components.
 - **Numba-Powered Monte Carlo**: Blazing fast 🔥 simulation core JIT-compiled with Numba.
+- **Multi-Trader Engine**: Simulates heterogeneous trader populations with individual margins, leverage, and lifecycle events.
 - **Systemic Stress Index (Rₜ)**: A composite index that tracks real-time market stress by combining volatility, liquidity, and return shocks.
 - **Circuit Breakers**: Implements a multi-state (NORMAL, SOFT, HARD) circuit breaker that dynamically adjusts margin multipliers in response to Rₜ.
 - **Variation Margin (VM) Default Modeling**: Accurately simulates scenarios where a trader's equity is wiped out, triggering a default.
@@ -29,11 +30,12 @@ It is designed for speed, accuracy, and flexibility, allowing researchers and de
 
 ## Risk Model Architecture (Component-Based)
 
-`dex-sim` uses a fully modular architecture. There is only one `RiskModel` class. A model is simply a composition of three pluggable components defined in YAML:
+`dex-sim` uses a fully modular architecture. There is only one `RiskModel` class. A model is simply a composition of pluggable components defined in YAML:
 
 1.  **Initial Margin (IM)**: Determines the base margin requirement (e.g., `ES_IM` for dynamic risk, `FixedLeverageIM` for constant leverage).
 2.  **Breaker**: A Finite State Machine that monitors systemic stress ($R_t$) and applies multipliers to the IM requirement.
 3.  **Liquidation**: Defines how positions are closed when margin is breached (e.g., `FullCloseOut`, `PartialCloseOut`).
+4.  **Trader Arrival**: Configures the population dynamics (entry rate, leverage distribution, equity distribution).
 
 This architecture allows you to simulate almost any exchange design without writing new Python code.
 
@@ -43,22 +45,29 @@ Models are defined in the `models` list of your experiment configuration file.
 
 ```yaml
 models:
-  - name: MyCustomModel
+  - name: CCP_Numba_Accelerated
+    backend: numba          # Enable high-performance engine
     im:
-      type: es              # 'es' or 'fixed_leverage'
-      conf: 0.99            # Component-specific params
+      type: es
+      conf: 0.99
     breaker:
-      soft: 1.0             # Trigger threshold for Soft state
-      hard: 2.0             # Trigger threshold for Hard state
-      multipliers: [1.0, 1.5, 2.0]  # [Normal, Soft, Hard] multipliers
+      soft: 1.0
+      hard: 2.0
+      multipliers: [1.0, 1.5, 2.0]
     liquidation:
-      type: partial         # 'full' or 'partial'
+      type: partial
       slippage: 0.001
+    trader_arrival:         # Configure population dynamics
+      enabled: true
+      pairs_per_tick: 2
+      equity_distribution: fixed
+      equity_dist_params: {value: 10000}
+      leverage_range: [2, 20]
 ```
 
 **Defaults:**
-*   If `breaker` is omitted: Infinite thresholds (never triggers), multipliers `[1, 1, 1]`.
-*   If `liquidation` is omitted: `type: full`, `slippage: 0.001`.
+*   `backend`: "python" (Reference implementation). Set to "numba" for speed.
+*   `trader_arrival`: Disabled by default.
 
 ### Example 1: CCP-Like Model (Cartesi CCP)
 Uses dynamic Expected Shortfall margin, an active circuit breaker, and partial liquidation to mitigate cascades.
@@ -66,6 +75,7 @@ Uses dynamic Expected Shortfall margin, an active circuit breaker, and partial l
 ```yaml
 models:
   - name: CCP_ES99
+    backend: numba
     im:
       type: es
       conf: 0.99
@@ -76,6 +86,9 @@ models:
     liquidation:
       type: partial
       slippage: 0.001
+    trader_arrival:
+      enabled: true
+      pairs_per_tick: 5
 ```
 
 ### Example 2: Hyperliquid-Style Fixed-Leverage Model
@@ -150,6 +163,22 @@ models:
       slippage: 0.0005
 ```
 
+## Performance & Optimization
+
+`dex-sim` includes two simulation backends:
+
+1.  **Python (Reference)**: Flexible, object-oriented, useful for debugging and developing new logic.
+2.  **Numba (Accelerated)**: JIT-compiled, array-based engine. roughly **100x-500x faster**.
+
+To enable the optimized engine, add `backend: numba` to your model config.
+
+```yaml
+models:
+  - name: High_Performance_Run
+    backend: numba
+    # ... other config ...
+```
+
 ## Extending Models
 
 You can add new components by creating a Python class and registering it in `experiment_manager.py`.
@@ -173,19 +202,17 @@ garch_params: garch_params.json
 
 models:
   - name: CCP
+    backend: numba
     im: { type: es, conf: 0.99 }
     breaker: { soft: 0.4, hard: 0.7, multipliers: [1.0, 1.1, 1.25] }
     liquidation: { type: partial }
+    trader_arrival: { enabled: true, pairs_per_tick: 2 }
 
   - name: HL_20x
+    backend: numba
     im: { type: fixed_leverage, leverage: 20 }
     breaker: { soft: .inf, hard: .inf, multipliers: [1,1,1] }
     liquidation: { type: full }
-
-  - name: Synthetic_10x
-    im: { type: fixed_leverage, leverage: 10 }
-    breaker: { soft: 0.5, hard: 0.9, multipliers: [1.0,1.2,1.4] }
-    liquidation: { type: partial }
 ```
 
 ## 📑 Simulation Summary & Reporting
@@ -285,73 +312,48 @@ Below is a guide to the charts produced by the suite and how to interpret them f
 *   **The Curve:** Shows the probability (Y-axis) that a loss will exceed a certain amount (X-axis).
 *   **The Tail:** A straight line on this log-log plot indicates "heavy tails" (power-law distribution), meaning catastrophic losses are more likely than a standard bell curve predicts.
 
-#### 2. Model Comparison Violins 🎻
-**What it is:** Side-by-side violin plots comparing the density of losses between models.
+#### 2. Systemic Solvency Curve (Health Monitor) 🛡️
+**What it is:** Dual-line chart comparing Total Trader Equity (Green) vs Total Maintenance Margin (Red).
 **Interpretation:**
-*   **Width:** The width of the shape represents the frequency of losses at that size.
-*   **Base vs. Neck:** A wide base means frequent small losses (slippage). A long, thin neck means rare, massive bankruptcies.
-*   **Risk Signal:** Ideally, you want a short, squat shape. Long necks indicate dangerous "Black Swan" potential.
+*   **Green Zone:** Solvency Buffer. The system is healthy.
+*   **Red Zone:** Insolvency/Fragility. Equity < MM means the system is undercollateralized and relying on the insurance fund.
 
-#### 3. Efficiency Frontier (Scatter) ⚖️
-**What it is:** A scatter plot of **Safety** (Max DF Usage) vs. **Capital Efficiency** (Average Margin Multiplier).
+#### 3. OI Timeline with Breaker Bands 🛑
+**What it is:** Stacked Area Chart of Open Interest overlaid with vertical bands for Breaker States (Green=Normal, Orange=Soft, Red=Hard).
 **Interpretation:**
-*   **Goal:** The "holy grail" is the bottom-left corner: low margin requirements (high efficiency) AND low DF usage (high safety).
-*   **Trade-off:** Usually, you trade one for the other. This chart quantifies exactly how much safety you buy with higher margins.
+*   **Efficacy:** Did the breaker trigger *before* the crash?
+*   **Gating:** Did OI contract (or stop growing) when the background turned Red?
 
-#### 4. Monte Carlo Convergence 🎯
-**What it is:** A line chart showing the running average of DF usage as the number of simulation paths increases.
+#### 4. Trade Intent Gating Waterfall 🚪
+**What it is:** Stacked Bar Chart showing volume Accepted (Normal), Accepted (Risk-Reducing), and Rejected.
 **Interpretation:**
-*   **Stability:** If the line is still oscillating wildly at the end, your simulation needs more paths (increase `paths` in config). If it flattens out, your results are statistically significant.
+*   **Gating:** Visualizes the "Reduce-Only" mechanism in action.
+*   **Red Bars:** Volume physically blocked by the risk engine.
 
----
-
-### 🔬 Model Deep-Dive Charts (Per-Model)
-
-For each model (e.g., `AES`, `FXD`), a dedicated folder is created with detailed forensics.
-
-#### 5. Regime Dynamics Autopsy (Composite) 🔍
-**What it is:** A 3-panel vertically stacked chart for a single "stress" path.
-1.  **Top:** Asset Price & Systemic Risk Index ($R_t$).
-2.  **Middle:** Breaker State (Shaded bands: Green=Normal, Orange=Soft, Red=Hard).
-3.  **Bottom:** Margin Multiplier.
+#### 5. Leverage Landscape Heatmap ⚖️
+**What it is:** 2D Heatmap (X=Time, Y=Leverage Bucket) showing the distribution of risk.
 **Interpretation:**
-*   **Causality:** Trace the chain reaction: Price Crash ➔ $R_t$ Spike ➔ Breaker Trigger ➔ Margin Hike.
-*   **Lag:** Check if the breaker triggers *before* the worst losses or *after* (too late).
+*   **Risk Buildup:** A "hot" red zone in the >20x bucket usually precedes a cascade.
+*   **Heterogeneity:** Shows if risk is concentrated in high-leverage gamblers.
 
-#### 6. Liquidation Intensity Heatmap 🔥
-**What it is:** A dense heatmap where X=Time, Y=Path (sorted by severity), and Color=Liquidation Fraction ($k$).
+#### 6. Enhanced Liquidation Timeline 💀
+**What it is:** Price chart overlay with markers for liquidation events.
+*   **Yellow Dot:** Partial Liquidation (Soft).
+*   **Red X:** Full Bankruptcy (Hard).
+**Interpretation:** distinguishes between controlled deleveraging and catastrophic failure.
+
+#### 7. Equity-at-Risk Snapshot 💰
+**What it is:** Histogram of System Equity at the end of the simulation.
 **Interpretation:**
-*   **Vertical Stripes:** A "systemic event" where the entire market liquidates simultaneously (correlation = 1).
-*   **Gradient:** Shows the difference between a gentle partial liquidation (light red) and a hard closeout (dark red).
-*   **Clustering:** Helps identify if liquidations are idiosyncratic (random dots) or structural (bands).
+*   **Left Skew:** Indicates high tail risk of insolvency.
+*   **Red Line:** The $0 bankruptcy threshold.
 
-#### 7. Notional Decay Fan Chart 📉
-**What it is:** A percentiles chart showing how the total Open Interest (notional) of the system decays over time.
+#### 8. Risk Diamond (Trader Heterogeneity) 💎
+**What it is:** Scatterplot of Position Size vs Leverage, sized by Margin Usage.
 **Interpretation:**
-*   **De-leveraging:** Shows how fast the system reduces risk.
-*   **Liquidity Crisis:** A vertical drop means the system is dumping massive inventory into the market instantly (high slippage risk). A gradual slope indicates a controlled "soft landing."
-
-#### 8. Slippage Waterfall (Cost Composition) 💸
-**What it is:** A breakdown of where the Default Fund money went.
-**Interpretation:**
-*   **Slippage:** Costs incurred by closing positions in illiquid markets.
-*   **Bankruptcy:** Costs incurred because the trader ran out of money before liquidation could happen (gap risk).
-*   **Signal:** High slippage means you need better liquidation logic. High bankruptcy means you need higher Initial Margin (IM).
-
-#### 9. Worst-Case Autopsy 🚑
-**What it is:** A detailed reconstruction of the single worst loss event in the entire simulation.
-**Interpretation:**
-*   **Narrative:** Tells the story of the failure. Did the trader die from a 1000-cut slow bleed, or one massive gap move?
-*   **Equity:** Shows exactly when the trader's equity crossed zero (insolvency).
-
----
-
-### 🧠 How to Read These Charts (Risk Analyst Guide)
-
-*   **Look for Correlations:** Does a spike in $R_t$ reliably predict a cluster of liquidations? If not, your breaker sensitivity might be too low.
-*   **Assess Tail Thickness:** In the **Survival Curve**, if the AES line is significantly below the FXD line in the bottom-right quadrant, AES is effectively mitigating catastrophic risk.
-*   **Check De-leveraging Speed:** In the **Notional Fan Chart**, you want to see the system reducing exposure *before* the price crashes to zero. If notional stays flat while price drops, the system is too slow to react.
-*   **Evaluate Efficiency:** If AES achieves the same safety (DF usage) as FXD but with a lower average margin multiplier (in the **Efficiency Frontier**), it proves AES is a superior capital-efficient model.
+*   **Top-Right:** Dangerous "Systemic Whales".
+*   **Top-Left:** High-leverage "Gamblers".
+*   **Bottom-Left:** Safe retail flow.
 
 ---
 

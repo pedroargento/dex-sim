@@ -892,6 +892,35 @@ def plot_risk_diamond(model_res: SingleModelResults, outdir: str):
     plt.close()
 
 
+def plot_survival_curve(model_res: SingleModelResults, outdir: str):
+    """
+    Kaplan-Meier-style Trader Survival Curve.
+    Shows the probability of a trader avoiding default over time.
+    
+    Requires granular trader lifetime data.
+    """
+    has_data = hasattr(model_res, 'trader_lifetimes') and model_res.trader_lifetimes is not None
+    
+    plt.figure(figsize=(10, 6))
+    
+    if not has_data:
+        plt.text(0.5, 0.5, "Trader Survival Data Not Available\n(Engine update required to export lifetimes)", 
+                 ha='center', va='center', fontsize=14, color='gray',
+                 bbox=dict(facecolor='white', alpha=0.8, edgecolor='gray', boxstyle='round,pad=1'))
+        plt.xlim(0, 1)
+        plt.ylim(0, 1)
+        plt.axis('off')
+    else:
+        # TODO: Implement KM curve logic
+        # lifetimes = model_res.trader_lifetimes (list of durations or death times)
+        pass
+
+    plt.title(f"Trader Survival Analysis (Kaplan-Meier) — {model_res.name}")
+    plt.tight_layout()
+    plt.savefig(os.path.join(outdir, f"{model_res.name}_survival_curve.png"), dpi=150)
+    plt.close()
+
+
 # ==============================================================================
 #  Drivers
 # ==============================================================================
@@ -916,6 +945,7 @@ def plot_all_for_model(model_res: SingleModelResults, outdir: str, max_paths: in
     plot_leverage_landscape_heatmap(model_res, d)
     plot_equity_at_risk_snapshot(model_res, d)
     plot_risk_diamond(model_res, d)
+    plot_survival_curve(model_res, d)
 
 
 def plot_all(results: MultiModelResults, outdir: str):

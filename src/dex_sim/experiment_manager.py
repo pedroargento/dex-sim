@@ -117,19 +117,57 @@ def build_trader_arrival(cfg):
 
 def build_model(mcfg: dict):
 
+
+
+
+
     """Build a RiskModel from a YAML model config."""
+
+
+
+
 
     return RiskModel(
 
+
+
+
+
         name=mcfg["name"],
+
+
+
+
 
         im=build_im(mcfg["im"]),
 
+
+
+
+
         breaker=build_breaker(mcfg.get("breaker", {})),
+
+
+
+
 
         liquidation=build_liquidation(mcfg.get("liquidation", {})),
 
+
+
+
+
         trader_arrival=build_trader_arrival(mcfg.get("trader_arrival", {})),
+
+
+
+
+
+        backend=mcfg.get("backend", "python"),
+
+
+
+
 
     )
 

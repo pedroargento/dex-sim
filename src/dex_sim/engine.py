@@ -63,29 +63,42 @@ def _spawn_traders(
         
     return new_intents
 
-def _simulate_paths_python(
-    model: RiskModel,
+# ============================================================
+#  Numba Simulation Core (Array-Based)
+# ============================================================
+
+@njit
+def _run_simulation_loop_numba(
     log_returns: np.ndarray,
     pct_returns: np.ndarray,
+    amihud_le: np.ndarray,
+    sigmas: np.ndarray,
     initial_price: float,
     sigma_daily: float,
-    initial_notional_target: float, 
-    # Note: initial_notional_target is used for the initial setup if we wanted to pre-populate,
-    # but instructions say "Remove monolithic... work with many Trader accounts".
-    # We will assume we start with some initial traders to match the requested 'notional' 
-    # or start empty if not specified. 
-    # To maintain backward compatibility of "simulation with X open interest",
-    # we should probably spawn initial traders to match 'initial_notional_target'.
+    initial_notional_target: float,
+    margin_mult_grid: np.ndarray,
+    breaker_state_grid: np.ndarray,
+    # Config Params (Flattened)
+    trader_arrival_enabled: bool,
+    trader_arrival_pairs: int,
+    trader_arrival_eq_val: float,
+    trader_arrival_lev_min: float,
+    trader_arrival_lev_max: float,
+    # Model Params
+    im_factor: float, # 1/lev or es_factor
+    im_is_es: bool,   # True if ES, False if Fixed (affects sigma scaling)
+    slippage_factor: float,
+    do_partial_liquidation: bool,
 ):
     P, T = log_returns.shape
     
     # Outputs
     df_required = np.zeros(P, dtype=np.float64)
-    defaults = np.zeros(P, dtype=np.int64)  # boolean really
+    defaults = np.zeros(P, dtype=np.int64)
     
     price_paths = np.zeros((P, T), dtype=np.float64)
-    lev_long = np.zeros((P, T), dtype=np.float64)
-    lev_short = np.zeros((P, T), dtype=np.float64)
+    lev_long_path = np.full((P, T), np.nan, dtype=np.float64)
+    lev_short_path = np.full((P, T), np.nan, dtype=np.float64)
     
     liquidation_fraction = np.zeros((P, T), dtype=np.float64)
     notional_path = np.zeros((P, T), dtype=np.float64)
@@ -93,25 +106,364 @@ def _simulate_paths_python(
     equity_short_path = np.zeros((P, T), dtype=np.float64)
     df_path = np.zeros((P, T), dtype=np.float64)
     slippage_cost = np.zeros((P, T), dtype=np.float64)
-    
-    nan = np.nan
-    
-    # Precompute breaker params
-    breaker = model.breaker
-    # We need to re-compute R_t inside the loop or pass it in?
-    # The original code passed `margin_mult` computed beforehand.
-    # We should stick to that pattern if possible, but the instructions say:
-    # "Compute R_t and breaker_state (unchanged formula). ... In the per-tick loop"
-    # So we can pass the pre-computed arrays for efficiency.
-    
-    # Slippage
-    slippage_factor = model.liquidation.slippage_factor
-    do_partial = isinstance(model.liquidation, PartialCloseOut)
 
-    # We need margin_mult and breaker_state passed in or computed. 
-    # The calling function `run_models` computes them. We will add them to args.
+    intent_accepted_normal = np.zeros((P, T), dtype=np.float64)
+    intent_accepted_reduce = np.zeros((P, T), dtype=np.float64)
+    intent_rejected = np.zeros((P, T), dtype=np.float64)
+
+    # Constants & Preallocations
+    # Max traders = Initial (2) + T * pairs * 2
+    # Let's be safe and allocate somewhat generously. 
+    # Numba works best with fixed arrays.
+    MAX_TRADERS = 2 + T * trader_arrival_pairs * 2 + 100
     
-    return None # Placeholder, see full implementation below
+    # Gamma
+    GAMMA = 0.8
+
+    # Lifetimes: We can't easily return variable length list from Numba.
+    # We will fill a large array and return count or valid slice.
+    MAX_LIFETIMES = MAX_TRADERS
+    trader_lifetimes = np.zeros(MAX_LIFETIMES * P, dtype=np.int64) # Flattened
+    lifetime_count = 0
+    
+    # Snapshots: Hard to do dicts in Numba. We will return structured arrays or separate arrays for Path 0.
+    # Snapshots for Path 0 at T-1
+    # We will return them as arrays: snap_pos, snap_eq, snap_lev, snap_mm
+    snap_pos = np.zeros(MAX_TRADERS, dtype=np.float64)
+    snap_eq = np.zeros(MAX_TRADERS, dtype=np.float64)
+    snap_lev = np.zeros(MAX_TRADERS, dtype=np.float64)
+    snap_mm_usage = np.zeros(MAX_TRADERS, dtype=np.float64)
+    snap_count = 0
+
+    for p in range(P):
+        # --- Trader Arrays (Per Path) ---
+        positions = np.zeros(MAX_TRADERS, dtype=np.float64)
+        equities = np.zeros(MAX_TRADERS, dtype=np.float64)
+        im_locked = np.zeros(MAX_TRADERS, dtype=np.float64)
+        mm_required = np.zeros(MAX_TRADERS, dtype=np.float64)
+        alive = np.zeros(MAX_TRADERS, dtype=np.int8)
+        start_step = np.zeros(MAX_TRADERS, dtype=np.int64)
+        
+        next_trader_id = 0
+        price = initial_price
+        
+        # Initialize ONE pair
+        if initial_notional_target > 0:
+            # Long
+            tid = next_trader_id
+            next_trader_id += 1
+            alive[tid] = 1
+            equities[tid] = initial_notional_target * 0.2
+            positions[tid] = initial_notional_target / price
+            start_step[tid] = 0
+            
+            # Short
+            tid2 = next_trader_id
+            next_trader_id += 1
+            alive[tid2] = 1
+            equities[tid2] = initial_notional_target * 0.2
+            positions[tid2] = -initial_notional_target / price
+            start_step[tid2] = 0
+            
+            # Initial Margin
+            # IM = Notional * Factor (if Fixed) OR Notional * Sigma * Factor (if ES)
+            # im_factor passed in should encapsulate this logic or we do it here.
+            # If ES: im = notional * sigma * es_factor
+            # If Fixed: im = notional * (1/lev)
+            # Let's assume im_factor passed is correct multiplier for 'notional' or 'notional*sigma'
+            # To simplify: calculate base_rate
+            
+            if im_is_es:
+                base_im_rate = sigma_daily * im_factor
+            else:
+                base_im_rate = im_factor
+            
+            im_base = initial_notional_target * base_im_rate
+            mult0 = margin_mult_grid[p, 0]
+            im_init = im_base * mult0
+            mm_init = im_init * GAMMA
+            
+            im_locked[tid] = im_init
+            mm_required[tid] = mm_init
+            im_locked[tid2] = im_init
+            mm_required[tid2] = mm_init
+
+        price_paths[p, 0] = price
+        
+        # Aggregate T=0
+        pos_L = 0.0
+        pos_S = 0.0
+        eq_L = 0.0
+        eq_S = 0.0
+        
+        for i in range(next_trader_id):
+            if alive[i]:
+                q = positions[i]
+                e = equities[i]
+                if q > 0:
+                    pos_L += q
+                    eq_L += e
+                elif q < 0:
+                    pos_S += -q # Store positive magnitude for OI
+                    eq_S += e
+        
+        notional_path[p, 0] = (pos_L + pos_S) * price * 0.5
+        equity_long_path[p, 0] = eq_L
+        equity_short_path[p, 0] = eq_S
+        
+        if pos_L > 0 and eq_L > 0:
+            lev_long_path[p, 0] = (pos_L * price) / eq_L
+        if pos_S > 0 and eq_S > 0:
+            lev_short_path[p, 0] = (pos_S * price) / eq_S
+
+        dead_path = False
+
+        for t in range(1, T):
+            if dead_path and not trader_arrival_enabled:
+                price_paths[p, t] = price
+                continue
+
+            # 1. Update Price
+            ret_log = log_returns[p, t]
+            price *= np.exp(ret_log)
+            price_paths[p, t] = price
+            
+            price_prev = price / np.exp(ret_log)
+            
+            # 2. Context
+            b_state = breaker_state_grid[p, t]
+            m_mult = margin_mult_grid[p, t]
+            
+            # 3. PnL Updates
+            # PnL = q * (price - price_prev)
+            delta_p = price - price_prev
+            
+            for i in range(next_trader_id):
+                if alive[i]:
+                    pnl = positions[i] * delta_p
+                    equities[i] += pnl
+            
+            # 4. Trader Arrival & New Trades
+            if trader_arrival_enabled:
+                # Generating intents inline
+                for _ in range(trader_arrival_pairs):
+                    # Spawn 2 traders
+                    # We need 2 slots
+                    if next_trader_id + 2 >= MAX_TRADERS:
+                        break # Safety break
+                        
+                    t1 = next_trader_id
+                    t2 = next_trader_id + 1
+                    next_trader_id += 2
+                    
+                    alive[t1] = 1
+                    alive[t2] = 1
+                    start_step[t1] = t
+                    start_step[t2] = t
+                    equities[t1] = trader_arrival_eq_val
+                    equities[t2] = trader_arrival_eq_val
+                    positions[t1] = 0.0
+                    positions[t2] = 0.0
+                    im_locked[t1] = 0.0
+                    im_locked[t2] = 0.0
+                    mm_required[t1] = 0.0
+                    mm_required[t2] = 0.0
+                    
+                    # Generate Intent
+                    # lev = uniform(min, max)
+                    lev = np.random.uniform(trader_arrival_lev_min, trader_arrival_lev_max)
+                    trade_notional = trader_arrival_eq_val * lev
+                    q = trade_notional / price
+                    
+                    # T1 Long (+q), T2 Short (-q)
+                    # Process T1
+                    
+                    # Gate Check
+                    accepted = True
+                    if b_state == 2: # HARD
+                        # Reduces exposure?
+                        # If pos=0, any trade increases exposure -> Rejected
+                        if positions[t1] == 0.0:
+                            accepted = False
+                        elif (positions[t1] > 0 and q < 0) or (positions[t1] < 0 and q > 0):
+                            accepted = True
+                        else:
+                            accepted = False
+                    
+                    if not accepted:
+                        intent_rejected[p, t] += abs(q * price)
+                    else:
+                        # Margin Check
+                        # IM Rate
+                        if im_is_es:
+                            rate = sigma_daily * im_factor
+                        else:
+                            rate = im_factor
+                        
+                        im_req = abs(q * price) * rate * m_mult
+                        mm_req = im_req * GAMMA
+                        
+                        if equities[t1] - im_locked[t1] >= im_req:
+                            positions[t1] += q
+                            im_locked[t1] += im_req
+                            mm_required[t1] += mm_req
+                            
+                            if b_state == 2:
+                                intent_accepted_reduce[p, t] += abs(q * price)
+                            else:
+                                intent_accepted_normal[p, t] += abs(q * price)
+                        else:
+                            intent_rejected[p, t] += abs(q * price)
+
+                    # Process T2 (-q)
+                    accepted = True
+                    q2 = -q
+                    if b_state == 2:
+                        if positions[t2] == 0.0:
+                            accepted = False
+                        elif (positions[t2] > 0 and q2 < 0) or (positions[t2] < 0 and q2 > 0):
+                            accepted = True
+                        else:
+                            accepted = False
+                            
+                    if not accepted:
+                        intent_rejected[p, t] += abs(q2 * price)
+                    else:
+                        if im_is_es:
+                            rate = sigma_daily * im_factor
+                        else:
+                            rate = im_factor
+                        im_req = abs(q2 * price) * rate * m_mult
+                        mm_req = im_req * GAMMA
+                        
+                        if equities[t2] - im_locked[t2] >= im_req:
+                            positions[t2] += q2
+                            im_locked[t2] += im_req
+                            mm_required[t2] += mm_req
+                            if b_state == 2:
+                                intent_accepted_reduce[p, t] += abs(q2 * price)
+                            else:
+                                intent_accepted_normal[p, t] += abs(q2 * price)
+                        else:
+                            intent_rejected[p, t] += abs(q2 * price)
+
+            # 5. Liquidation
+            step_liq_fraction = 0.0
+            
+            for i in range(next_trader_id):
+                if alive[i]:
+                    if equities[i] < mm_required[i]:
+                        shortfall = mm_required[i] - equities[i]
+                        notional_t = abs(positions[i] * price)
+                        
+                        if notional_t < 1e-9:
+                            continue
+                        
+                        k = 1.0
+                        if do_partial_liquidation:
+                            k = shortfall / notional_t
+                            if k > 1.0: k = 1.0
+                        
+                        qty_close = positions[i] * k
+                        cost = abs(qty_close * price) * slippage_factor
+                        
+                        equities[i] -= cost
+                        slippage_cost[p, t] += cost
+                        positions[i] -= qty_close
+                        im_locked[i] *= (1.0 - k)
+                        mm_required[i] *= (1.0 - k)
+                        
+                        if k > step_liq_fraction:
+                            step_liq_fraction = k
+                        
+                        if equities[i] < 0:
+                            loss = -equities[i]
+                            df_path[p, t] += loss
+                            df_required[p] += loss
+                            defaults[p] = 1
+                            alive[i] = 0 # Kill
+                            equities[i] = 0.0
+                            positions[i] = 0.0
+                            
+                            # Record Lifetime
+                            if start_step[i] >= 0:
+                                dur = t - start_step[i]
+                                if lifetime_count < len(trader_lifetimes):
+                                    trader_lifetimes[lifetime_count] = dur
+                                    lifetime_count += 1
+                                start_step[i] = -1 # Marked
+            
+            liquidation_fraction[p, t] = step_liq_fraction
+
+            # 6. Aggregate
+            pos_L = 0.0
+            pos_S = 0.0
+            eq_L = 0.0
+            eq_S = 0.0
+            
+            for i in range(next_trader_id):
+                if alive[i]:
+                    q = positions[i]
+                    e = equities[i]
+                    if q > 0:
+                        pos_L += q
+                        eq_L += e
+                    elif q < 0:
+                        pos_S += -q
+                        eq_S += e
+            
+            notional_path[p, t] = (pos_L + pos_S) * price * 0.5
+            equity_long_path[p, t] = eq_L
+            equity_short_path[p, t] = eq_S
+            
+            if pos_L > 1e-9:
+                lev_long_path[p, t] = (pos_L * price) / eq_L if eq_L > 0 else np.nan
+            else:
+                lev_long_path[p, t] = np.nan
+                
+            if pos_S > 1e-9:
+                lev_short_path[p, t] = (pos_S * price) / eq_S if eq_S > 0 else np.nan
+            else:
+                lev_short_path[p, t] = np.nan
+
+        # End Path
+        # If Path 0, take snapshots
+        if p == 0:
+            for i in range(next_trader_id):
+                if alive[i] and abs(positions[i]) > 1e-9:
+                    if snap_count < MAX_TRADERS:
+                        snap_pos[snap_count] = positions[i] * price
+                        snap_eq[snap_count] = equities[i]
+                        # Lev = Notional / Equity
+                        if equities[i] > 0:
+                            snap_lev[snap_count] = abs(positions[i] * price) / equities[i]
+                            snap_mm_usage[snap_count] = mm_required[i] / equities[i]
+                        else:
+                            snap_lev[snap_count] = 0.0
+                            snap_mm_usage[snap_count] = 0.0
+                        snap_count += 1
+        
+        # Remaining lifetimes
+        for i in range(next_trader_id):
+            if alive[i] and start_step[i] >= 0:
+                dur = T - start_step[i]
+                if lifetime_count < len(trader_lifetimes):
+                    trader_lifetimes[lifetime_count] = dur
+                    lifetime_count += 1
+
+    # Trim lifetimes and snapshots
+    final_lifetimes = trader_lifetimes[:lifetime_count]
+    
+    # Reconstruct snapshots list of dicts for compatibility
+    # We can't do this in Numba easily. 
+    # We will return the arrays and reconstruction happens in Python wrapper.
+    
+    return (
+        df_required, defaults, price_paths, lev_long_path, lev_short_path,
+        liquidation_fraction, notional_path, equity_long_path, equity_short_path, df_path, slippage_cost,
+        intent_accepted_normal, intent_accepted_reduce, intent_rejected,
+        final_lifetimes, snap_pos[:snap_count], snap_eq[:snap_count], snap_lev[:snap_count], snap_mm_usage[:snap_count]
+    )
 
 def _run_simulation_loop(
     model: RiskModel,
@@ -125,6 +477,14 @@ def _run_simulation_loop(
     margin_mult_grid: np.ndarray,
     breaker_state_grid: np.ndarray,
 ):
+    # Check backend selector
+    # Since RiskModel object structure changes are limited, we can check an attribute or default to Python.
+    # Prompt: "if model.backend == 'numba': use _run_simulation_loop_numba else: use _run_simulation_loop"
+    # But _run_simulation_loop IS the python function.
+    # We need to either rename the python one or put the switch in `run_models`.
+    # The prompt says "Add: if model.backend == 'numba': ... in run_models()".
+    # So `_run_simulation_loop` remains the Python implementation.
+    
     P, T = log_returns.shape
     
     # Initialize Result Arrays
@@ -454,37 +814,131 @@ def run_models(
             breaker_multipliers=mults,
         )
 
-        # Run Python Kernel
-        (
-            df_required,
-            defaults_i,
-            price_paths,
-            lev_long,
-            lev_short,
-            liquidation_fraction,
-            notional_path,
-            equity_long,
-            equity_short,
-            df_path,
-            slippage_cost,
-            # New Outputs
-            intent_accepted_normal,
-            intent_accepted_reduce,
-            intent_rejected,
-            trader_lifetimes,
-            trader_snapshots
-        ) = _run_simulation_loop(
-            model=model,
-            log_returns=log_returns,
-            pct_returns=pct_returns,
-            amihud_le=amihud_le,
-            sigmas=sigmas,
-            initial_price=initial_price,
-            sigma_daily=sigma_daily,
-            initial_notional_target=notional,
-            margin_mult_grid=margin_mult,
-            breaker_state_grid=breaker_state,
-        )
+        # Backend Switching
+        # Check if 'backend' attribute exists, defaults to 'python'
+        backend = getattr(model, 'backend', 'python')
+        
+        if backend == 'numba':
+            # Prepare Numba Args
+            # Extract config values
+            ta = model.trader_arrival
+            ta_enabled = ta.enabled
+            ta_pairs = ta.pairs_per_tick
+            ta_eq_val = float(ta.equity_dist_params.get("value", 10000.0))
+            ta_lev_min = float(ta.leverage_range[0])
+            ta_lev_max = float(ta.leverage_range[1])
+            
+            # IM logic
+            # Check IM type
+            # Assuming standard IM types: ES_IM or FixedLeverageIM
+            # We need to distill it down to `im_factor` and `im_is_es`
+            # Use introspection on model.im
+            im_is_es = hasattr(model.im, 'conf') # Heuristic or check class name
+            if im_is_es:
+                # ES: compute factor once. 
+                # ES_IM.compute uses: sigma * es_factor.
+                # We need es_factor.
+                # Call internal logic? Or replicate.
+                # model.im is an ES_IM instance. 
+                # We can calculate ES factor from scipy stats here (in Python)
+                # code: t_inv = t.ppf(conf, df); factor = ...
+                # Or just call model.im.compute(1.0, 1.0) to get 'es_factor * 1 * 1'?
+                # model.im.compute(1.0, 1.0) returns: 1.0 * es_factor * 1.0.
+                # So im_factor = model.im.compute(1.0, 1.0) / 1.0 = es_factor.
+                # Wait, compute(notional, sigma) -> expected_shortfall * notional
+                # expected_shortfall = sigma * es_factor
+                # So compute(1, 1) = 1 * es_factor * 1 = es_factor.
+                im_factor = model.im.compute(1.0, 1.0)
+            else:
+                # Fixed: compute(notional, sigma) -> notional / leverage.
+                # Factor = 1 / leverage.
+                im_factor = 1.0 / model.im.leverage
+            
+            slippage = model.liquidation.slippage_factor
+            do_partial = isinstance(model.liquidation, PartialCloseOut)
+
+            (
+                df_required,
+                defaults_i,
+                price_paths,
+                lev_long,
+                lev_short,
+                liquidation_fraction,
+                notional_path,
+                equity_long,
+                equity_short,
+                df_path,
+                slippage_cost,
+                intent_accepted_normal,
+                intent_accepted_reduce,
+                intent_rejected,
+                trader_lifetimes_flat,
+                # Snapshots come as arrays
+                snap_pos, snap_eq, snap_lev, snap_mm_usage
+            ) = _run_simulation_loop_numba(
+                log_returns=log_returns,
+                pct_returns=pct_returns,
+                amihud_le=amihud_le,
+                sigmas=sigmas,
+                initial_price=initial_price,
+                sigma_daily=sigma_daily,
+                initial_notional_target=initial_notional_target,
+                margin_mult_grid=margin_mult,
+                breaker_state_grid=breaker_state,
+                trader_arrival_enabled=ta_enabled,
+                trader_arrival_pairs=ta_pairs,
+                trader_arrival_eq_val=ta_eq_val,
+                trader_arrival_lev_min=ta_lev_min,
+                trader_arrival_lev_max=ta_lev_max,
+                im_factor=im_factor,
+                im_is_es=im_is_es,
+                slippage_factor=slippage,
+                do_partial_liquidation=do_partial
+            )
+            
+            # Reconstruct snapshots dict list
+            trader_snapshots = []
+            for i in range(len(snap_pos)):
+                trader_snapshots.append({
+                    "position": snap_pos[i],
+                    "equity": snap_eq[i],
+                    "leverage": snap_lev[i],
+                    "mm_usage": snap_mm_usage[i]
+                })
+            
+            trader_lifetimes = trader_lifetimes_flat
+
+        else:
+            # Python Backend
+            (
+                df_required,
+                defaults_i,
+                price_paths,
+                lev_long,
+                lev_short,
+                liquidation_fraction,
+                notional_path,
+                equity_long,
+                equity_short,
+                df_path,
+                slippage_cost,
+                intent_accepted_normal,
+                intent_accepted_reduce,
+                intent_rejected,
+                trader_lifetimes,
+                trader_snapshots
+            ) = _run_simulation_loop(
+                model=model,
+                log_returns=log_returns,
+                pct_returns=pct_returns,
+                amihud_le=amihud_le,
+                sigmas=sigmas,
+                initial_price=initial_price,
+                sigma_daily=sigma_daily,
+                initial_notional_target=notional,
+                margin_mult_grid=margin_mult,
+                breaker_state_grid=breaker_state,
+            )
 
         model_results[model.name] = SingleModelResults(
             name=model.name,

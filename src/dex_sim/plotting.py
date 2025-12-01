@@ -683,48 +683,47 @@ def plot_trade_gating_waterfall(model_res: SingleModelResults, outdir: str):
         - "How much flow was blocked by the breaker?"
         - "Did reduce-only mode allow exits while blocking entries?"
     """
-    if model_res.notional_paths is None:
-        return
-
     idx = _get_worst_path_idx(model_res)
-    T = model_res.notional_paths.shape[1]
-    t = np.arange(T - 1) # Diff reduces length by 1
     
-    # --- Placeholder Data Logic (TODO: Wire to engine outputs) ---
-    # We use Net Notional Change as a proxy for "Accepted Normal" volume.
-    # Real engine should export: intent_accepted_normal, intent_accepted_reduce, intent_rejected
+    # Check for real intent logs
+    has_intents = (model_res.intent_accepted_normal is not None)
     
-    notional = model_res.notional_paths[idx]
-    delta_oi = np.abs(np.diff(notional)) # Proxy: Absolute volume change
-    
-    accepted_normal = delta_oi
-    accepted_reduce = np.zeros_like(delta_oi)
-    rejected = np.zeros_like(delta_oi)
-    
-    # If Breaker State is available, we can pretend some volume was "Reduce Only"
-    if model_res.breaker_state is not None:
-        states = model_res.breaker_state[idx][1:] # Align with diff
-        # Mock logic: In Hard Mode (2), treat all flow as "Accepted Reduce" (visual test)
-        mask_hard = (states == 2)
-        accepted_reduce[mask_hard] = accepted_normal[mask_hard]
-        accepted_normal[mask_hard] = 0
+    if has_intents:
+        # Use real data (Slice for worst path)
+        # Arrays are [P, T].
+        # Bar chart x-axis: T
+        t = np.arange(model_res.intent_accepted_normal.shape[1])
         
-        # Mock logic: Random "Rejected" volume in Hard Mode to show the red bar
-        # rejected[mask_hard] = accepted_reduce[mask_hard] * 0.5 
-    
-    # --- Plotting ---
+        accepted_normal = model_res.intent_accepted_normal[idx]
+        accepted_reduce = model_res.intent_accepted_reduce[idx]
+        rejected = model_res.intent_rejected[idx]
+        
+        label_extra = ""
+    else:
+        # Fallback Proxy (Net Notional Change) if logs missing
+        if model_res.notional_paths is None:
+            return
+        t = np.arange(model_res.notional_paths.shape[1] - 1)
+        notional = model_res.notional_paths[idx]
+        delta_oi = np.abs(np.diff(notional))
+        
+        accepted_normal = delta_oi
+        accepted_reduce = np.zeros_like(delta_oi)
+        rejected = np.zeros_like(delta_oi)
+        label_extra = "\n(Proxy Data: Net OI Change)"
+
     plt.figure(figsize=(12, 6))
     
     p1 = plt.bar(t, accepted_normal, color='#27ae60', width=1.0, alpha=0.8, label='Accepted (Normal)')
     p2 = plt.bar(t, accepted_reduce, bottom=accepted_normal, color='#f1c40f', width=1.0, alpha=0.8, label='Accepted (Reduce-Only)')
     p3 = plt.bar(t, rejected, bottom=accepted_normal+accepted_reduce, color='#c0392b', width=1.0, alpha=0.6, label='Rejected (Gated)')
     
-    # Annotation
-    plt.text(0.5, 0.95, "TODO: Integration with engine intent logs pending.\n(Showing proxy data based on OI change)", 
-             transform=plt.gca().transAxes, ha='center', va='top', 
-             bbox=dict(facecolor='white', alpha=0.8, edgecolor='gray'))
+    if not has_intents:
+        plt.text(0.5, 0.95, "Showing proxy data based on OI change (Intent logs unavailable)", 
+                 transform=plt.gca().transAxes, ha='center', va='top', 
+                 bbox=dict(facecolor='white', alpha=0.8, edgecolor='gray'))
     
-    plt.title(f"Trade Intent Gating Waterfall — {model_res.name}")
+    plt.title(f"Trade Intent Gating Waterfall — {model_res.name}{label_extra}")
     plt.xlabel("Time Step")
     plt.ylabel("Volume / Notional Change ($)")
     plt.legend(loc='upper right')
@@ -878,11 +877,8 @@ def plot_risk_diamond(model_res: SingleModelResults, outdir: str):
     """
     Scatterplot of Position Size vs Leverage, sized by Margin Usage.
     "The Risk Diamond": Identifies Systemic Whales vs Gamblers.
-    
-    Requires granular trader snapshots.
     """
-    # Check for future 'trader_snapshots' attribute
-    has_granular_data = hasattr(model_res, 'trader_snapshots') and model_res.trader_snapshots is not None
+    has_granular_data = hasattr(model_res, 'trader_snapshots') and model_res.trader_snapshots is not None and len(model_res.trader_snapshots) > 0
     
     plt.figure(figsize=(10, 8))
     
@@ -895,9 +891,39 @@ def plot_risk_diamond(model_res: SingleModelResults, outdir: str):
         plt.ylim(0, 1)
         plt.axis('off')
     else:
-        # TODO: Implement scatter logic when data is available
-        # x = positions, y = leverage, s = margin_usage
-        pass
+        # Extract Data from List[Dict]
+        snaps = model_res.trader_snapshots
+        
+        # Filter active positions
+        positions = np.array([s['position'] for s in snaps])
+        leverages = np.array([s['leverage'] for s in snaps])
+        mm_usage = np.array([s['mm_usage'] for s in snaps])
+        equities = np.array([s['equity'] for s in snaps])
+        
+        # Absolute position size
+        abs_pos = np.abs(positions)
+        
+        # Avoid log(0)
+        abs_pos = np.maximum(abs_pos, 1.0) 
+        
+        # Plot
+        # Size proportional to MM Usage (Riskiness)
+        sizes = mm_usage * 200 + 20 # Base size 20
+        
+        scatter = plt.scatter(abs_pos, leverages, s=sizes, c=equities, 
+                              cmap='viridis', alpha=0.7, edgecolors='k', linewidth=0.5)
+        
+        plt.xscale('log')
+        plt.xlabel("Position Size ($) [Log Scale]")
+        plt.ylabel("Effective Leverage (x)")
+        plt.colorbar(scatter, label='Trader Equity ($)')
+        
+        # Quadrant Annotations
+        plt.axhline(20, color='red', ls=':', alpha=0.5) # High Lev Threshold
+        # Add text annotations for quadrants if data exists
+        if len(abs_pos) > 0:
+            max_x = np.max(abs_pos)
+            plt.text(max_x, 50, "DANGER ZONE\n(High Lev Whales)", color='red', ha='right', va='bottom')
 
     plt.title(f"Risk Diamond (Trader Heterogeneity) — {model_res.name}")
     plt.tight_layout()
@@ -909,10 +935,8 @@ def plot_survival_curve(model_res: SingleModelResults, outdir: str):
     """
     Kaplan-Meier-style Trader Survival Curve.
     Shows the probability of a trader avoiding default over time.
-    
-    Requires granular trader lifetime data.
     """
-    has_data = hasattr(model_res, 'trader_lifetimes') and model_res.trader_lifetimes is not None
+    has_data = hasattr(model_res, 'trader_lifetimes') and model_res.trader_lifetimes is not None and len(model_res.trader_lifetimes) > 0
     
     plt.figure(figsize=(10, 6))
     
@@ -924,11 +948,31 @@ def plot_survival_curve(model_res: SingleModelResults, outdir: str):
         plt.ylim(0, 1)
         plt.axis('off')
     else:
-        # TODO: Implement KM curve logic
-        # lifetimes = model_res.trader_lifetimes (list of durations or death times)
-        pass
+        lifetimes = np.sort(model_res.trader_lifetimes)
+        n = len(lifetimes)
+        
+        # Survival Function S(t) = 1 - CDF(t)
+        # Y axis: Fraction of traders surviving longer than t
+        # X axis: Time t
+        
+        # Compute empirical survival function
+        # y values from 1.0 down to 0.0
+        y = 1.0 - np.arange(n) / n
+        
+        # Step plot
+        plt.step(lifetimes, y, where='post', color='#8e44ad', lw=2)
+        
+        # Mark Median Survival Time
+        if n > 0:
+            median_idx = n // 2
+            median_time = lifetimes[median_idx]
+            plt.axvline(median_time, color='gray', ls='--', label=f'Median Survival ({median_time} ticks)')
 
-    plt.title(f"Trader Survival Analysis (Kaplan-Meier) — {model_res.name}")
+    plt.title(f"Trader Survival Analysis (Kaplan-Meier Proxy) — {model_res.name}")
+    plt.xlabel("Trader Lifetime (Ticks)")
+    plt.ylabel("Survival Probability")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.savefig(os.path.join(outdir, f"{model_res.name}_survival_curve.png"), dpi=150)
     plt.close()

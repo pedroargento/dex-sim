@@ -96,13 +96,14 @@ class PartialCloseOut(LiquidationStrategy):
 # ---------- Trader Entities ----------
 
 class Trader:
-    def __init__(self, equity: float, position: float = 0.0):
+    def __init__(self, equity: float, position: float = 0.0, start_step: int = 0):
         self.equity = equity
         self.position = position  # >0 long, <0 short
         self.im_locked = 0.0
         self.mm_required = 0.0
         self.realized_pnl = 0.0
         self.unrealized_pnl = 0.0
+        self.start_step = start_step
 
     def reduces_exposure(self, delta_q: float) -> bool:
         # True if trade moves position toward zero, not further away

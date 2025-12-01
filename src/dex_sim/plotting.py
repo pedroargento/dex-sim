@@ -861,6 +861,37 @@ def plot_equity_at_risk_snapshot(model_res: SingleModelResults, outdir: str):
     plt.close()
 
 
+def plot_risk_diamond(model_res: SingleModelResults, outdir: str):
+    """
+    Scatterplot of Position Size vs Leverage, sized by Margin Usage.
+    "The Risk Diamond": Identifies Systemic Whales vs Gamblers.
+    
+    Requires granular trader snapshots.
+    """
+    # Check for future 'trader_snapshots' attribute
+    has_granular_data = hasattr(model_res, 'trader_snapshots') and model_res.trader_snapshots is not None
+    
+    plt.figure(figsize=(10, 8))
+    
+    if not has_granular_data:
+        # Placeholder for missing data
+        plt.text(0.5, 0.5, "Granular Trader Data Not Available\n(Engine update required to export snapshots)", 
+                 ha='center', va='center', fontsize=14, color='gray',
+                 bbox=dict(facecolor='white', alpha=0.8, edgecolor='gray', boxstyle='round,pad=1'))
+        plt.xlim(0, 1)
+        plt.ylim(0, 1)
+        plt.axis('off')
+    else:
+        # TODO: Implement scatter logic when data is available
+        # x = positions, y = leverage, s = margin_usage
+        pass
+
+    plt.title(f"Risk Diamond (Trader Heterogeneity) — {model_res.name}")
+    plt.tight_layout()
+    plt.savefig(os.path.join(outdir, f"{model_res.name}_risk_diamond.png"), dpi=150)
+    plt.close()
+
+
 # ==============================================================================
 #  Drivers
 # ==============================================================================
@@ -884,6 +915,7 @@ def plot_all_for_model(model_res: SingleModelResults, outdir: str, max_paths: in
     plot_enhanced_liquidation_timeline(model_res, d)
     plot_leverage_landscape_heatmap(model_res, d)
     plot_equity_at_risk_snapshot(model_res, d)
+    plot_risk_diamond(model_res, d)
 
 
 def plot_all(results: MultiModelResults, outdir: str):

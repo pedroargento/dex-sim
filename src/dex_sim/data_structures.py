@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Dict, Optional, Any
+from typing import Dict, Optional, Any, List
 
 import numpy as np
 
@@ -52,6 +52,15 @@ class SingleModelResults:
     # Equity paths (optional but very useful)
     equity_long: Optional[np.ndarray] = None  # [P, T]
     equity_short: Optional[np.ndarray] = None  # [P, T]
+
+    # Trade Intent Logs
+    intent_accepted_normal: Optional[np.ndarray] = None  # [P, T]
+    intent_accepted_reduce: Optional[np.ndarray] = None  # [P, T]
+    intent_rejected: Optional[np.ndarray] = None  # [P, T]
+
+    # Granular Data
+    trader_lifetimes: Optional[np.ndarray] = None # [Total Traders across all paths]
+    trader_snapshots: Optional[List[Dict[str, Any]]] = None # For scatter plots (sample or worst path)
 
     # General-purpose metadata
     metadata: Dict[str, Any] = field(default_factory=dict)

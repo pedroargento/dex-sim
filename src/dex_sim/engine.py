@@ -1,4 +1,4 @@
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Any
 import numpy as np
 import math
 from numba import njit
@@ -15,7 +15,8 @@ from .models.components import Trader
 def _spawn_traders(
     traders: List[Trader],
     config, 
-    current_price: float
+    current_price: float,
+    step: int
 ) -> List[Tuple[int, float]]:
     """
     Spawns new trader pairs and generates initial trade intents.
@@ -33,8 +34,8 @@ def _spawn_traders(
     
     for _ in range(pairs):
         # Create two traders
-        t1 = Trader(equity=eq_val, position=0.0)
-        t2 = Trader(equity=eq_val, position=0.0)
+        t1 = Trader(equity=eq_val, position=0.0, start_step=step)
+        t2 = Trader(equity=eq_val, position=0.0, start_step=step)
         
         idx1 = len(traders)
         traders.append(t1)
@@ -141,25 +142,27 @@ def _run_simulation_loop(
     df_path = np.zeros((P, T), dtype=np.float64)
     slippage_cost = np.zeros((P, T), dtype=np.float64)
 
+    # Trade Intent Logs
+    intent_accepted_normal = np.zeros((P, T), dtype=np.float64)
+    intent_accepted_reduce = np.zeros((P, T), dtype=np.float64)
+    intent_rejected = np.zeros((P, T), dtype=np.float64)
+
+    # Granular Data Containers (for worst case path or sample)
+    # We collect lifetimes for ALL traders across ALL paths to get statistics
+    # Using a simple list might grow large (5000 * 100 = 500k items), which is fine.
+    all_trader_lifetimes = [] 
+    
+    # We collect snapshots ONLY for the path with max df_required (computed post-hoc? No, we don't know yet)
+    # Or we can collect snapshots for Path 0 as a representative sample?
+    # "Worst path" is only known after simulation.
+    # Let's store snapshots for Path 0 always, and maybe update if we find a worse path?
+    # Updating is complex. Let's just store Path 0 for distribution visualization. 
+    # Usually Path 0 is random.
+    # Better: Collect for Path 0. If the user wants worst case, we'd need to re-run or store all.
+    # Given memory constraints, storing Path 0 snapshots is a safe default.
+    representative_snapshots = [] 
+
     # Helper to compute MM from IM (gamma factor)
-    # Typically MM is a fraction of IM, or defined by the model.
-    # The instructions say "MM_new = gamma * IM_new". 
-    # We need to find gamma. 
-    # In `test_engine.py` or `components.py` there isn't an explicit gamma.
-    # Existing code: `req_im = curr_notional * im_rate * margin_mult`.
-    # It treats `req_im` as the maintenance requirement for liquidation checks?
-    # In `_simulate_paths_numba`: "If equity < required_margin ... close".
-    # So `req_im` acts as MM. 
-    # But for *opening* positions, we usually check Initial Margin.
-    # Let's assume:
-    #   MM_required = computed by model.im.compute(...) * multiplier * gamma?
-    #   Actually, the existing code uses `im0` (Initial Margin) as the baseline for `req_im` in the loop.
-    #   It seems `req_im` IS the maintenance margin in the loop logic.
-    #   Let's stick to: 
-    #     IM (for opening) = model.initial_margin(...) * multiplier
-    #     MM (for maintenance) = IM * 0.8 (Standard DeFi assumption if not specified)
-    #     Wait, instructions say: "IM_base = compute_ES_margin(...) ... MM_new = gamma * IM_new"
-    #     I will use gamma = 0.8 as a reasonable default since it's not in the prompt's config.
     GAMMA = 0.8
 
     print(f"Simulating {model.name} over {P} paths...")
@@ -170,18 +173,15 @@ def _run_simulation_loop(
         price = initial_price
         
         # Initialize ONE pair to match the requested initial_notional (backward compatibility)
-        # If initial_notional_target > 0
         if initial_notional_target > 0:
-            # Create two whales/aggregates to represent the starting OI
-            t_long = Trader(equity=initial_notional_target*0.2, position=initial_notional_target/price) # 5x lev
-            t_short = Trader(equity=initial_notional_target*0.2, position=-initial_notional_target/price)
+            t_long = Trader(equity=initial_notional_target*0.2, position=initial_notional_target/price, start_step=0) # 5x lev
+            t_short = Trader(equity=initial_notional_target*0.2, position=-initial_notional_target/price, start_step=0)
             
             # Initialize their margin
             im_base = model.initial_margin(initial_notional_target, sigma_daily)
-            # Apply initial breaker multiplier (usually 1.0 at t=0)
             mult0 = margin_mult_grid[p, 0]
             im_init = im_base * mult0
-            mm_init = im_init * GAMMA # Maintenance threshold
+            mm_init = im_init * GAMMA
             
             t_long.im_locked = im_init
             t_long.mm_required = mm_init
@@ -197,7 +197,7 @@ def _run_simulation_loop(
         # Aggregate t=0
         pos_L = sum(max(t.position, 0) for t in traders)
         pos_S = sum(max(-t.position, 0) for t in traders)
-        notional_path[p, 0] = (pos_L + pos_S) / 2.0 * price # Avg OI
+        notional_path[p, 0] = (pos_L + pos_S) / 2.0 * price 
         equity_long_path[p, 0] = sum(t.equity for t in traders if t.position > 0)
         equity_short_path[p, 0] = sum(t.equity for t in traders if t.position < 0)
         
@@ -210,7 +210,6 @@ def _run_simulation_loop(
 
         for t in range(1, T):
             if dead_path and not model.trader_arrival.enabled:
-                # If everyone dead and no new traders, just fill forward
                 price_paths[p, t] = price
                 continue
 
@@ -224,117 +223,111 @@ def _run_simulation_loop(
             b_state = breaker_state_grid[p, t]
             m_mult = margin_mult_grid[p, t]
             
-            # 3. PnL Updates (Mark to Market)
-            # Loop traders
+            # 3. PnL Updates
+            price_prev = price / np.exp(ret_log)
             for trader in traders:
-                # VM = position_qty * (price_new - price_old)
-                # Equivalent to: notional_old * pct_return
-                # We store position in units (q).
-                # PnL = q * (price_current - price_prev)
-                # But we already updated price. 
-                # PnL ~= q * price_prev * ret_pct (approx) or q * (price_curr - price_prev)
-                # Exact:
-                price_prev = price / np.exp(ret_log)
                 pnl = trader.position * (price - price_prev)
                 trader.equity += pnl
                 trader.unrealized_pnl += pnl
             
             # 4. Trader Arrival & New Trades
             if model.trader_arrival.enabled:
-                # Spawn
-                new_intents = _spawn_traders(traders, model.trader_arrival, price)
+                new_intents = _spawn_traders(traders, model.trader_arrival, price, step=t)
                 
-                # Process Intents
                 for t_idx, delta_q in new_intents:
                     trader = traders[t_idx]
+                    
+                    # Logging Volumes
+                    vol_usd = abs(delta_q * price)
                     
                     # a. Breaker Gate (HARD = Reduce Only)
                     if b_state == 2: # HARD
                         if not trader.reduces_exposure(delta_q):
+                            intent_rejected[p, t] += vol_usd
                             continue # Reject
+                        else:
+                            # Accepted Reduce
+                            # Check margin next
+                            pass
+                    else:
+                        # Normal/Soft -> Accepted Normal potential
+                        pass
                     
                     # b. Margin Check for Opening
-                    # Calculate IM required for this trade
                     trade_notional = abs(delta_q * price)
                     im_base = model.initial_margin(trade_notional, sigma_daily)
                     im_req = im_base * m_mult
                     mm_req = im_req * GAMMA 
                     
-                    # Check affordability
-                    # available_equity = equity - im_locked
                     if trader.equity - trader.im_locked >= im_req:
                         # Accept
                         trader.position += delta_q
                         trader.im_locked += im_req
                         trader.mm_required += mm_req
+                        
+                        # Log Acceptance
+                        if b_state == 2:
+                            intent_accepted_reduce[p, t] += vol_usd
+                        else:
+                            intent_accepted_normal[p, t] += vol_usd
+                    else:
+                        # Rejected due to Margin
+                        intent_rejected[p, t] += vol_usd
             
             # 5. Liquidation Check
-            # Iterate all traders
-            # If equity < mm_required -> Liquidate
-            
             step_liq_fraction = 0.0
             
+            # Iterate copy or handle removal?
+            # We won't remove traders from list to keep indices stable if needed, 
+            # or we assume they just sit with 0 pos.
+            # If equity < 0, they are dead.
+            
             for trader in traders:
-                # Check solvency
                 if trader.equity < trader.mm_required:
-                    # Default Logic
                     shortfall = trader.mm_required - trader.equity
-                    # If simple bankruptcy (equity < 0), we also catch it here as shortfall > mm
-                    
                     notional_t = abs(trader.position * price)
                     
                     if notional_t < 1e-9:
-                        continue # Empty trader
+                        continue
                         
-                    # Calculate fraction k
                     is_partial = isinstance(model.liquidation, PartialCloseOut)
-                    
                     k = 1.0
                     if is_partial:
-                        # k = shortfall / notional
                         k = shortfall / notional_t
                         if k > 1.0: k = 1.0
                     
-                    # Execute Liquidation
                     qty_close = trader.position * k
                     cost = abs(qty_close * price) * model.liquidation.slippage_factor
                     
-                    # Apply cost
                     trader.equity -= cost
                     slippage_cost[p, t] += cost
-                    
-                    # Update position
                     trader.position -= qty_close
                     trader.im_locked *= (1.0 - k)
                     trader.mm_required *= (1.0 - k)
                     
                     step_liq_fraction = max(step_liq_fraction, k)
                     
-                    # Check for Bankruptcy (Default Fund Usage)
                     if trader.equity < 0:
                         loss = -trader.equity
                         df_path[p, t] += loss
                         df_required[p] += loss
                         defaults[p] = 1
-                        # Reset equity to 0 for accounting? 
-                        # Usually we leave it negative or remove trader.
-                        # For aggregation, negative equity cancels out positive equity of others?
-                        # No, CCP absorbs negative equity. 
-                        # So for "Equity Long/Short" plots, we should probably floor at 0 or separate?
-                        # Standard: The trader is effectively zeroed out, the debt is moved to CCP.
                         trader.equity = 0.0
-                        trader.position = 0.0 # Force close remaining if bankrupt?
+                        trader.position = 0.0 
                         trader.im_locked = 0.0
                         trader.mm_required = 0.0
+                        
+                        # Record Lifetime
+                        if trader.start_step >= 0:
+                            duration = t - trader.start_step
+                            all_trader_lifetimes.append(duration)
+                            trader.start_step = -1 # Mark as recorded
             
             liquidation_fraction[p, t] = step_liq_fraction
 
             # 6. Aggregate & Store Stats
             pos_L = sum(max(t.position, 0) for t in traders)
             pos_S = sum(max(-t.position, 0) for t in traders)
-            
-            # Aggregate Equity (Floor at 0 for visual sanity? Or keep raw?)
-            # Plots usually expect Total Long Equity.
             eq_L = sum(t.equity for t in traders if t.position > 0)
             eq_S = sum(t.equity for t in traders if t.position < 0)
             
@@ -347,9 +340,29 @@ def _run_simulation_loop(
             if pos_S > 1e-9:
                 lev_short_path[p, t] = (pos_S * price) / eq_S if eq_S > 0 else np.nan
 
+        # End of Path: Collect snapshots if this is Path 0
+        if p == 0:
+            # Snapshot all active traders at final step
+            for tr in traders:
+                if abs(tr.position) > 1e-9: # Only active
+                    snapshot = {
+                        "position": tr.position * price, # USD value
+                        "equity": tr.equity,
+                        "leverage": (abs(tr.position * price) / tr.equity) if tr.equity > 0 else 0.0,
+                        "mm_usage": (tr.mm_required / tr.equity) if tr.equity > 0 else 0.0
+                    }
+                    representative_snapshots.append(snapshot)
+        
+        # Record lifetimes for survivors
+        for tr in traders:
+            if tr.start_step >= 0 and tr.equity > 0:
+                all_trader_lifetimes.append(T - tr.start_step)
+
     return (
         df_required, defaults, price_paths, lev_long_path, lev_short_path,
-        liquidation_fraction, notional_path, equity_long_path, equity_short_path, df_path, slippage_cost
+        liquidation_fraction, notional_path, equity_long_path, equity_short_path, df_path, slippage_cost,
+        intent_accepted_normal, intent_accepted_reduce, intent_rejected,
+        np.array(all_trader_lifetimes), representative_snapshots
     )
 
 
@@ -454,6 +467,12 @@ def run_models(
             equity_short,
             df_path,
             slippage_cost,
+            # New Outputs
+            intent_accepted_normal,
+            intent_accepted_reduce,
+            intent_rejected,
+            trader_lifetimes,
+            trader_snapshots
         ) = _run_simulation_loop(
             model=model,
             log_returns=log_returns,
@@ -484,6 +503,12 @@ def run_models(
             equity_short=equity_short,
             df_path=df_path,
             slippage_cost=slippage_cost,
+            # Pipeline
+            intent_accepted_normal=intent_accepted_normal,
+            intent_accepted_reduce=intent_accepted_reduce,
+            intent_rejected=intent_rejected,
+            trader_lifetimes=trader_lifetimes,
+            trader_snapshots=trader_snapshots
         )
 
     return MultiModelResults(

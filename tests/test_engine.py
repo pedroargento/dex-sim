@@ -73,7 +73,9 @@ def test_simulation_basic():
     
     (
         df_required, defaults, price_paths, lev_long, lev_short,
-        liquidation_fraction, notional_path, equity_long, equity_short, df_path, slippage_cost
+        liquidation_fraction, notional_path, equity_long, equity_short, df_path, slippage_cost,
+        intent_accepted_normal, intent_accepted_reduce, intent_rejected,
+        trader_lifetimes, trader_snapshots
     ) = _run_simulation_loop(
         model, log_returns, pct_returns, amihud_le, sigmas, initial_price, sigma_daily,
         initial_notional_target=notional,
@@ -165,10 +167,12 @@ def test_simulation_margin_call():
     sigmas = np.ones((P, T)) * sigma_daily
     margin_mult_grid = np.ones((P, T))
     breaker_state_grid = np.zeros((P, T), dtype=np.int8)
-    
+
     (
         df_required, defaults, price_paths, lev_long, lev_short,
-        liquidation_fraction, notional_path, equity_long, equity_short, df_path, slippage_cost
+        liquidation_fraction, notional_path, equity_long, equity_short, df_path, slippage_cost,
+        intent_accepted_normal, intent_accepted_reduce, intent_rejected,
+        trader_lifetimes, trader_snapshots
     ) = _run_simulation_loop(
         model, log_returns, pct_returns, amihud_le, sigmas, initial_price, sigma_daily,
         initial_notional_target=notional,
@@ -212,7 +216,9 @@ def test_partial_liquidation():
     
     (
         df_required, defaults, price_paths, lev_long, lev_short,
-        liquidation_fraction, notional_path, equity_long, equity_short, df_path, slippage_cost
+        liquidation_fraction, notional_path, equity_long, equity_short, df_path, slippage_cost,
+        intent_accepted_normal, intent_accepted_reduce, intent_rejected,
+        trader_lifetimes, trader_snapshots
     ) = _run_simulation_loop(
         model, log_returns, pct_returns, amihud_le, sigmas, initial_price, sigma_daily,
         initial_notional_target=notional,

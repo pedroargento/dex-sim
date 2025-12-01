@@ -549,6 +549,300 @@ def plot_system_leverage(model_res: SingleModelResults, outdir: str):
     plt.close()
 
 
+def plot_oi_with_breaker_bands(model_res: SingleModelResults, outdir: str):
+    """
+    Stacked area chart of OI (Long/Short) over time with Breaker State bands.
+    Focuses on the path with the highest DF usage (stress test).
+    
+    Insight:
+        - Shows if OI contracts when Breaker enters HARD mode (Red).
+        - Correlates market size with risk regime.
+    """
+    if model_res.notional_paths is None or model_res.breaker_state is None:
+        return
+    
+    idx = _get_worst_path_idx(model_res)
+    
+    # Data
+    T = model_res.notional_paths.shape[1]
+    t = np.arange(T)
+    oi_side = model_res.notional_paths[idx]
+    states = model_res.breaker_state[idx]
+    
+    plt.figure(figsize=(12, 6))
+    
+    # Stackplot
+    # Assuming symmetry (OI Long ~ OI Short ~ Notional Per Side) for now
+    # Total OI = Long + Short
+    plt.stackplot(t, oi_side, oi_side, labels=['Long OI', 'Short OI'], 
+                  colors=['#2980b9', '#c0392b'], alpha=0.7)
+    
+    # TODO: Overlay Whale Concentration Line
+    # whale_share = calculate_whale_share(...)
+    # plt.plot(t, whale_share * (oi_side * 2), color='gold', lw=1.5, label='Whale Concentration (Top 1%)')
+    
+    # Breaker Bands
+    # Use axes transform to fill vertical height
+    ax = plt.gca()
+    trans = ax.get_xaxis_transform()
+    
+    # Normal (0) = Green, Soft (1) = Orange, Hard (2) = Red
+    ax.fill_between(t, 0, 1, where=(states==0), color='green', alpha=0.1, transform=trans, label='Normal')
+    ax.fill_between(t, 0, 1, where=(states==1), color='orange', alpha=0.2, transform=trans, label='Soft')
+    ax.fill_between(t, 0, 1, where=(states==2), color='red', alpha=0.3, transform=trans, label='Hard')
+
+    plt.title(f"OI Timeline with Breaker Bands (Path #{idx}) — {model_res.name}")
+    plt.xlabel("Time Step")
+    plt.ylabel("Open Interest ($)")
+    
+    # Deduplicate legend labels
+    handles, labels = ax.get_legend_handles_labels()
+    by_label = dict(zip(labels, handles))
+    plt.legend(by_label.values(), by_label.keys(), loc='upper left')
+    
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(os.path.join(outdir, f"{model_res.name}_oi_breaker_bands.png"), dpi=150)
+    plt.close()
+
+
+def plot_systemic_solvency_curve(model_res: SingleModelResults, outdir: str):
+    """
+    Dual-Line Chart comparing Total System Equity vs Total Maintenance Margin.
+    
+    Insight:
+        - Visualizes the system's "Safety Buffer".
+        - Green Fill: Solvent (Equity > MM).
+        - Red Fill: Insolvent/Fragile (Equity < MM).
+    """
+    if model_res.equity_long is None or model_res.equity_short is None:
+        return
+    
+    idx = _get_worst_path_idx(model_res)
+    t = np.arange(model_res.equity_long.shape[1])
+    
+    # Total Equity (System-wide)
+    total_equity = model_res.equity_long[idx] + model_res.equity_short[idx]
+    
+    # Total MM Required (Approximation based on available data)
+    # MM ~ Notional * Base_IM_Rate * Breaker_Mult * Gamma(0.8)
+    # We need Base_IM_Rate. Let's infer from t=0 state or metadata.
+    # Fallback: Use Lev_Long and Lev_Short to infer IM usage? 
+    # Or just use: Margin Multiplier * (Notional / Base_Leverage)?
+    # Let's assume a standard Base IM of 10% (10x) if not known, or try to reverse engineer.
+    # Better: Use (Equity / Leverage) * Gamma? No, Equity != Margin Locked.
+    # Best available proxy: Notional / Initial_Leverage * Multiplier * 0.8
+    # We don't have Initial_Leverage easily.
+    # Alternative: Use `df_required` spikes to pinpoint MM breaches? No.
+    # Let's use a heuristic: MM_Total approx 5-10% of Notional * Multiplier.
+    # If metadata has 'im_rate', use it.
+    
+    # Heuristic for Plotting (Visual Guide Only):
+    # Assume Base MM is ~5% of Notional (20x max lev).
+    # Adjust dynamically by breaker multiplier.
+    base_mm_rate = 0.05 
+    if model_res.margin_multiplier is not None:
+        mm_mult = model_res.margin_multiplier[idx]
+    else:
+        mm_mult = np.ones_like(t)
+        
+    if model_res.notional_paths is not None:
+        # Total Notional = Long + Short ~ 2 * Side Notional
+        total_notional = model_res.notional_paths[idx] * 2.0 
+        total_mm = total_notional * base_mm_rate * mm_mult
+    else:
+        return
+
+    plt.figure(figsize=(10, 6))
+    
+    plt.plot(t, total_equity, color='#27ae60', lw=2, label='Total Trader Equity')
+    plt.plot(t, total_mm, color='#c0392b', lw=2, ls='--', label='Total MM Required (Est.)')
+    
+    # Fill
+    plt.fill_between(t, total_equity, total_mm, where=(total_equity >= total_mm), 
+                     color='green', alpha=0.1, interpolate=True, label='Solvent Buffer')
+    plt.fill_between(t, total_equity, total_mm, where=(total_equity < total_mm), 
+                     color='red', alpha=0.2, interpolate=True, label='Insolvency Risk')
+    
+    plt.title(f"Systemic Solvency Curve (Health Monitor) — {model_res.name}")
+    plt.xlabel("Time Step")
+    plt.ylabel("Value ($)")
+    plt.legend(loc='upper left')
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(os.path.join(outdir, f"{model_res.name}_solvency_curve.png"), dpi=150)
+    plt.close()
+
+
+def plot_trade_intent_waterfall(model_res: SingleModelResults, outdir: str):
+    """
+    Proxy for Trade Intent Gating: Net Notional Change Waterfall.
+    
+    Insight:
+        - Shows the net flow of capital (Entry vs Exit).
+        - "Did HARD mode (Red background) force net exits (Red bars)?"
+    """
+    if model_res.notional_paths is None or model_res.breaker_state is None:
+        return
+
+    idx = _get_worst_path_idx(model_res)
+    
+    # Delta OI
+    notional = model_res.notional_paths[idx]
+    delta_oi = np.diff(notional, prepend=notional[0])
+    t = np.arange(len(delta_oi))
+    
+    # Colors
+    colors = ['#27ae60' if x >= 0 else '#c0392b' for x in delta_oi]
+    
+    plt.figure(figsize=(12, 6))
+    plt.bar(t, delta_oi, color=colors, width=1.0, alpha=0.8, label='Net OI Change')
+    
+    # Breaker Overlay
+    states = model_res.breaker_state[idx]
+    ax = plt.gca()
+    trans = ax.get_xaxis_transform()
+    
+    ax.fill_between(t, 0, 1, where=(states==2), color='red', alpha=0.15, 
+                    transform=trans, label='Hard Breaker (Reduce-Only)')
+    
+    plt.title(f"Trade Flow Proxy (Net OI Change) — {model_res.name}")
+    plt.xlabel("Time Step")
+    plt.ylabel("Change in Notional ($)")
+    plt.legend(loc='upper right')
+    plt.grid(True, axis='y', alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(os.path.join(outdir, f"{model_res.name}_trade_flow_proxy.png"), dpi=150)
+    plt.close()
+
+
+def plot_enhanced_liquidation_timeline(model_res: SingleModelResults, outdir: str):
+    """
+    Price Chart Overlay with granular liquidation markers.
+    Distinguishes between Partial (Soft) and Full (Hard) liquidations.
+    """
+    idx = _get_worst_path_idx(model_res)
+    
+    price = model_res.price_paths[idx]
+    t = np.arange(len(price))
+    
+    plt.figure(figsize=(12, 6))
+    plt.plot(t, price, color='#2c3e50', alpha=0.6, lw=1.5, label='Asset Price')
+    
+    # Markers
+    if model_res.liquidation_fraction is not None:
+        liqs = model_res.liquidation_fraction[idx]
+        
+        # Partial: 0 < k < 1
+        mask_partial = (liqs > 0) & (liqs < 1.0)
+        if np.any(mask_partial):
+            plt.scatter(t[mask_partial], price[mask_partial], 
+                        c='#f1c40f', s=30, marker='o', label='Partial Liquidation', zorder=5)
+        
+        # Full: k = 1.0 or Default
+        # Note: 'defaults' is boolean per path. We want TIME of default.
+        # Usually k=1 implies default. Or look for last non-zero notional? 
+        # Let's use k=1 as proxy for Full Closeout events.
+        mask_full = (liqs >= 1.0)
+        if np.any(mask_full):
+            plt.scatter(t[mask_full], price[mask_full], 
+                        c='#e74c3c', s=100, marker='x', linewidths=2.5, label='Full Closeout / Default', zorder=6)
+
+    plt.title(f"Enhanced Liquidation Timeline (Path #{idx}) — {model_res.name}")
+    plt.xlabel("Time Step")
+    plt.ylabel("Price ($)")
+    plt.legend(loc='upper left')
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(os.path.join(outdir, f"{model_res.name}_enhanced_liquidation.png"), dpi=150)
+    plt.close()
+
+
+def plot_leverage_landscape_heatmap(model_res: SingleModelResults, outdir: str):
+    """
+    Heatmap of System Leverage Distribution across Monte Carlo Paths over time.
+    Since we aggregate traders per path, this shows 'Inter-Path' heterogeneity.
+    
+    X-Axis: Time
+    Y-Axis: Leverage Buckets
+    Color: Probability Density (% of paths in that bucket)
+    """
+    if model_res.lev_long is None:
+        return
+    
+    # Combine Long and Short leverage? Or just max?
+    # Let's use max(lev_long, lev_short) per path/tick to capture worst case
+    lev_data = model_res.lev_long
+    if model_res.lev_short is not None:
+        lev_data = np.fmax(lev_data, model_res.lev_short)
+    
+    # Handle NaNs (dead paths) -> 0 leverage
+    lev_data = np.nan_to_num(lev_data, nan=0.0)
+    
+    bins = [0, 5, 10, 20, 50, 100, 1000]
+    bin_labels = ['0-5x', '5-10x', '10-20x', '20-50x', '50-100x', '>100x']
+    
+    P, T = lev_data.shape
+    hist_grid = np.zeros((len(bins)-1, T))
+    
+    # Compute histogram per time step
+    for t in range(T):
+        counts, _ = np.histogram(lev_data[:, t], bins=bins)
+        hist_grid[:, t] = counts / P # Normalize to probability
+    
+    plt.figure(figsize=(12, 7))
+    sns.heatmap(hist_grid, cmap="inferno", yticklabels=bin_labels, 
+                cbar_kws={'label': 'Path Density (%)'}, vmin=0, vmax=1)
+    
+    plt.title(f"Leverage Landscape (System Max Lev across Paths) — {model_res.name}")
+    plt.xlabel("Time Step")
+    plt.ylabel("Leverage Bucket")
+    plt.gca().invert_yaxis() # Low lev at bottom
+    plt.tight_layout()
+    plt.savefig(os.path.join(outdir, f"{model_res.name}_leverage_landscape.png"), dpi=150)
+    plt.close()
+
+
+def plot_equity_at_risk_snapshot(model_res: SingleModelResults, outdir: str):
+    """
+    Distribution of End-of-Simulation System Equity across all paths.
+    Approximates 'Equity at Risk' (EaR).
+    
+    Insight:
+        - Tail risk of system insolvency.
+        - Skewness of wealth outcomes.
+    """
+    if model_res.equity_long is None:
+        return
+    
+    # Take final timestep (T-1)
+    final_eq_long = model_res.equity_long[:, -1]
+    final_eq_short = model_res.equity_short[:, -1]
+    total_equity = final_eq_long + final_eq_short
+    
+    plt.figure(figsize=(10, 6))
+    sns.histplot(total_equity, kde=True, stat='density', element='step', color='teal')
+    
+    # Mark Zero (Insolvency)
+    plt.axvline(0, color='red', lw=2, ls='--', label='Insolvency Threshold ($0)')
+    
+    # Mark Mean
+    mean_eq = np.mean(total_equity)
+    plt.axvline(mean_eq, color='black', lw=1.5, ls=':', label=f'Mean Equity (${mean_eq:,.0f})')
+    
+    # Stats
+    insolvency_prob = np.mean(total_equity < 0) * 100
+    
+    plt.title(f"End-State Equity Distribution (EaR) — {model_res.name}\nProb. of System Insolvency: {insolvency_prob:.2f}%")
+    plt.xlabel("Total System Equity ($)")
+    plt.ylabel("Density")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(os.path.join(outdir, f"{model_res.name}_equity_at_risk.png"), dpi=150)
+    plt.close()
+
+
 # ==============================================================================
 #  Drivers
 # ==============================================================================
@@ -566,6 +860,12 @@ def plot_all_for_model(model_res: SingleModelResults, outdir: str, max_paths: in
     plot_worst_case_autopsy(model_res, d)
     plot_slippage_waterfall(model_res, d)
     plot_system_leverage(model_res, d)
+    plot_oi_with_breaker_bands(model_res, d)
+    plot_systemic_solvency_curve(model_res, d)
+    plot_trade_intent_waterfall(model_res, d)
+    plot_enhanced_liquidation_timeline(model_res, d)
+    plot_leverage_landscape_heatmap(model_res, d)
+    plot_equity_at_risk_snapshot(model_res, d)
 
 
 def plot_all(results: MultiModelResults, outdir: str):

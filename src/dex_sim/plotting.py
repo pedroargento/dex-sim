@@ -674,45 +674,63 @@ def plot_systemic_solvency_curve(model_res: SingleModelResults, outdir: str):
     plt.close()
 
 
-def plot_trade_intent_waterfall(model_res: SingleModelResults, outdir: str):
+def plot_trade_gating_waterfall(model_res: SingleModelResults, outdir: str):
     """
-    Proxy for Trade Intent Gating: Net Notional Change Waterfall.
+    Stacked Bar Chart of Trade Intent Gating (Waterall).
+    Shows volume Accepted (Normal), Accepted (Risk-Reducing), and Rejected.
     
     Insight:
-        - Shows the net flow of capital (Entry vs Exit).
-        - "Did HARD mode (Red background) force net exits (Red bars)?"
+        - "How much flow was blocked by the breaker?"
+        - "Did reduce-only mode allow exits while blocking entries?"
     """
-    if model_res.notional_paths is None or model_res.breaker_state is None:
+    if model_res.notional_paths is None:
         return
 
     idx = _get_worst_path_idx(model_res)
+    T = model_res.notional_paths.shape[1]
+    t = np.arange(T - 1) # Diff reduces length by 1
     
-    # Delta OI
+    # --- Placeholder Data Logic (TODO: Wire to engine outputs) ---
+    # We use Net Notional Change as a proxy for "Accepted Normal" volume.
+    # Real engine should export: intent_accepted_normal, intent_accepted_reduce, intent_rejected
+    
     notional = model_res.notional_paths[idx]
-    delta_oi = np.diff(notional, prepend=notional[0])
-    t = np.arange(len(delta_oi))
+    delta_oi = np.abs(np.diff(notional)) # Proxy: Absolute volume change
     
-    # Colors
-    colors = ['#27ae60' if x >= 0 else '#c0392b' for x in delta_oi]
+    accepted_normal = delta_oi
+    accepted_reduce = np.zeros_like(delta_oi)
+    rejected = np.zeros_like(delta_oi)
     
+    # If Breaker State is available, we can pretend some volume was "Reduce Only"
+    if model_res.breaker_state is not None:
+        states = model_res.breaker_state[idx][1:] # Align with diff
+        # Mock logic: In Hard Mode (2), treat all flow as "Accepted Reduce" (visual test)
+        mask_hard = (states == 2)
+        accepted_reduce[mask_hard] = accepted_normal[mask_hard]
+        accepted_normal[mask_hard] = 0
+        
+        # Mock logic: Random "Rejected" volume in Hard Mode to show the red bar
+        # rejected[mask_hard] = accepted_reduce[mask_hard] * 0.5 
+    
+    # --- Plotting ---
     plt.figure(figsize=(12, 6))
-    plt.bar(t, delta_oi, color=colors, width=1.0, alpha=0.8, label='Net OI Change')
     
-    # Breaker Overlay
-    states = model_res.breaker_state[idx]
-    ax = plt.gca()
-    trans = ax.get_xaxis_transform()
+    p1 = plt.bar(t, accepted_normal, color='#27ae60', width=1.0, alpha=0.8, label='Accepted (Normal)')
+    p2 = plt.bar(t, accepted_reduce, bottom=accepted_normal, color='#f1c40f', width=1.0, alpha=0.8, label='Accepted (Reduce-Only)')
+    p3 = plt.bar(t, rejected, bottom=accepted_normal+accepted_reduce, color='#c0392b', width=1.0, alpha=0.6, label='Rejected (Gated)')
     
-    ax.fill_between(t, 0, 1, where=(states==2), color='red', alpha=0.15, 
-                    transform=trans, label='Hard Breaker (Reduce-Only)')
+    # Annotation
+    plt.text(0.5, 0.95, "TODO: Integration with engine intent logs pending.\n(Showing proxy data based on OI change)", 
+             transform=plt.gca().transAxes, ha='center', va='top', 
+             bbox=dict(facecolor='white', alpha=0.8, edgecolor='gray'))
     
-    plt.title(f"Trade Flow Proxy (Net OI Change) — {model_res.name}")
+    plt.title(f"Trade Intent Gating Waterfall — {model_res.name}")
     plt.xlabel("Time Step")
-    plt.ylabel("Change in Notional ($)")
+    plt.ylabel("Volume / Notional Change ($)")
     plt.legend(loc='upper right')
     plt.grid(True, axis='y', alpha=0.3)
     plt.tight_layout()
-    plt.savefig(os.path.join(outdir, f"{model_res.name}_trade_flow_proxy.png"), dpi=150)
+    plt.savefig(os.path.join(outdir, f"{model_res.name}_trade_gating_waterfall.png"), dpi=150)
     plt.close()
 
 
@@ -862,7 +880,7 @@ def plot_all_for_model(model_res: SingleModelResults, outdir: str, max_paths: in
     plot_system_leverage(model_res, d)
     plot_oi_with_breaker_bands(model_res, d)
     plot_systemic_solvency_curve(model_res, d)
-    plot_trade_intent_waterfall(model_res, d)
+    plot_trade_gating_waterfall(model_res, d)
     plot_enhanced_liquidation_timeline(model_res, d)
     plot_leverage_landscape_heatmap(model_res, d)
     plot_equity_at_risk_snapshot(model_res, d)

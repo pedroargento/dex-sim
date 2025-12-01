@@ -838,13 +838,26 @@ def plot_equity_at_risk_snapshot(model_res: SingleModelResults, outdir: str):
     final_eq_short = model_res.equity_short[:, -1]
     total_equity = final_eq_long + final_eq_short
     
+    # Filter NaNs and Infs
+    total_equity = total_equity[np.isfinite(total_equity)]
+    
+    if len(total_equity) == 0:
+        return
+
+    # Clip outliers for safer plotting (avoid MemoryError with massive ranges)
+    # Use robust range (0.5% to 99.5%)
+    low, high = np.percentile(total_equity, [0.5, 99.5])
+    clipped_equity = total_equity[(total_equity >= low) & (total_equity <= high)]
+    
     plt.figure(figsize=(10, 6))
-    sns.histplot(total_equity, kde=True, stat='density', element='step', color='teal')
+    
+    # Use matplotlib hist for safety
+    plt.hist(clipped_equity, bins=50, density=True, color='teal', alpha=0.7, label='Equity Density')
     
     # Mark Zero (Insolvency)
     plt.axvline(0, color='red', lw=2, ls='--', label='Insolvency Threshold ($0)')
     
-    # Mark Mean
+    # Mark Mean (of full distribution, not clipped)
     mean_eq = np.mean(total_equity)
     plt.axvline(mean_eq, color='black', lw=1.5, ls=':', label=f'Mean Equity (${mean_eq:,.0f})')
     

@@ -882,7 +882,7 @@ def run_models(
                 sigmas=sigmas,
                 initial_price=initial_price,
                 sigma_daily=sigma_daily,
-                initial_notional_target=initial_notional_target,
+                initial_notional_target=notional,
                 margin_mult_grid=margin_mult,
                 breaker_state_grid=breaker_state,
                 trader_arrival_enabled=ta_enabled,

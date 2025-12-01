@@ -44,6 +44,14 @@ This architecture allows you to simulate almost any exchange design without writ
 Models are defined in the `models` list of your experiment configuration file.
 
 ```yaml
+# Global Trader Configuration
+trader_arrival:
+  enabled: true
+  pairs_per_tick: 2
+  equity_distribution: fixed
+  equity_dist_params: {value: 10000}
+  leverage_range: [2, 20]
+
 models:
   - name: CCP_Numba_Accelerated
     backend: numba          # Enable high-performance engine
@@ -57,22 +65,20 @@ models:
     liquidation:
       type: partial
       slippage: 0.001
-    trader_arrival:         # Configure population dynamics
-      enabled: true
-      pairs_per_tick: 2
-      equity_distribution: fixed
-      equity_dist_params: {value: 10000}
-      leverage_range: [2, 20]
 ```
 
 **Defaults:**
 *   `backend`: "python" (Reference implementation). Set to "numba" for speed.
-*   `trader_arrival`: Disabled by default.
+*   `trader_arrival`: Disabled by default. Can be set globally or per-model.
 
 ### Example 1: CCP-Like Model (Cartesi CCP)
 Uses dynamic Expected Shortfall margin, an active circuit breaker, and partial liquidation to mitigate cascades.
 
 ```yaml
+trader_arrival:
+  enabled: true
+  pairs_per_tick: 5
+
 models:
   - name: CCP_ES99
     backend: numba
@@ -86,9 +92,6 @@ models:
     liquidation:
       type: partial
       slippage: 0.001
-    trader_arrival:
-      enabled: true
-      pairs_per_tick: 5
 ```
 
 ### Example 2: Hyperliquid-Style Fixed-Leverage Model

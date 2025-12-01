@@ -115,60 +115,20 @@ def build_trader_arrival(cfg):
 
 
 
-def build_model(mcfg: dict):
-
-
-
-
-
+def build_model(mcfg: dict, global_trader_arrival_cfg: dict = None):
     """Build a RiskModel from a YAML model config."""
-
-
-
-
+    # Prefer model-specific trader_arrival, fallback to global
+    ta_cfg = mcfg.get("trader_arrival", global_trader_arrival_cfg)
+    if ta_cfg is None:
+        ta_cfg = {}
 
     return RiskModel(
-
-
-
-
-
         name=mcfg["name"],
-
-
-
-
-
         im=build_im(mcfg["im"]),
-
-
-
-
-
         breaker=build_breaker(mcfg.get("breaker", {})),
-
-
-
-
-
         liquidation=build_liquidation(mcfg.get("liquidation", {})),
-
-
-
-
-
-        trader_arrival=build_trader_arrival(mcfg.get("trader_arrival", {})),
-
-
-
-
-
+        trader_arrival=build_trader_arrival(ta_cfg),
         backend=mcfg.get("backend", "python"),
-
-
-
-
-
     )
 
 
@@ -186,8 +146,11 @@ def run_experiment_from_config(config_file: str, root: str = "results") -> str:
     outdir = os.path.join(root, rid)
     ensure_dir(outdir)
 
+    # Global settings
+    global_trader_arrival = cfg.get("trader_arrival", {})
+
     # Build models
-    models = [build_model(m) for m in cfg["models"]]
+    models = [build_model(m, global_trader_arrival) for m in cfg["models"]]
 
     # Simulation parameters
     num_paths = cfg.get("paths", 5000)

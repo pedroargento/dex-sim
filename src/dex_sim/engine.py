@@ -7,6 +7,7 @@ from .mc_generator import MCReturnsGenerator
 from .data_structures import MultiModelResults, SingleModelResults
 from .models import RiskModel, FullCloseOut, PartialCloseOut
 from .models.components import Trader
+from .engine_columnar import _run_simulation_loop_numba_columnar
 
 # ============================================================
 #  Python Simulation Core (Multi-Trader)
@@ -68,7 +69,7 @@ def _spawn_traders(
 # ============================================================
 
 @njit
-def _run_simulation_loop_numba(
+def _run_simulation_loop_numba_legacy(
     log_returns: np.ndarray,
     pct_returns: np.ndarray,
     amihud_le: np.ndarray,
@@ -802,7 +803,7 @@ def run_models(
         # Check if 'backend' attribute exists, defaults to 'python'
         backend = getattr(model, 'backend', 'python')
         
-        if backend == 'numba':
+        if backend == 'numba' or backend == 'numba_legacy':
             # Prepare Numba Args
             # Extract config values
             ta = model.trader_arrival
@@ -862,6 +863,11 @@ def run_models(
             slippage = model.liquidation.slippage_factor
             do_partial = isinstance(model.liquidation, PartialCloseOut)
 
+            if backend == 'numba':
+                engine_func = _run_simulation_loop_numba_columnar
+            else:
+                engine_func = _run_simulation_loop_numba_legacy
+
             (
                 df_required,
                 defaults_i,
@@ -880,7 +886,7 @@ def run_models(
                 trader_lifetimes_flat,
                 # Snapshots come as arrays
                 snap_pos, snap_eq, snap_lev, snap_mm_usage
-            ) = _run_simulation_loop_numba(
+            ) = engine_func(
                 log_returns=log_returns,
                 pct_returns=pct_returns,
                 amihud_le=amihud_le,

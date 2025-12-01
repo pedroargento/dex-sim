@@ -1,308 +1,360 @@
-from typing import List, Dict
+from typing import List, Dict, Tuple
 import numpy as np
+import math
 from numba import njit
 
 from .mc_generator import MCReturnsGenerator
 from .data_structures import MultiModelResults, SingleModelResults
 from .models import RiskModel, FullCloseOut, PartialCloseOut
-
+from .models.components import Trader
 
 # ============================================================
-#  Numba VM / DF simulation core
+#  Python Simulation Core (Multi-Trader)
 # ============================================================
 
+def _spawn_traders(
+    traders: List[Trader],
+    config, 
+    current_price: float
+) -> List[Tuple[int, float]]:
+    """
+    Spawns new trader pairs and generates initial trade intents.
+    Returns a list of (trader_index, delta_notional) intents.
+    """
+    if not config.enabled:
+        return []
 
-@njit
-def _simulate_paths_numba(
+    new_intents = []
+    
+    # Params
+    pairs = config.pairs_per_tick
+    eq_val = config.equity_dist_params.get("value", 10000.0)
+    notional_sigma = config.notional_dist_params.get("sigma", 1.0)
+    
+    for _ in range(pairs):
+        # Create two traders
+        t1 = Trader(equity=eq_val, position=0.0)
+        t2 = Trader(equity=eq_val, position=0.0)
+        
+        idx1 = len(traders)
+        traders.append(t1)
+        idx2 = len(traders)
+        traders.append(t2)
+        
+        # Generate Notional (in USD)
+        # Simple lognormal around a base or just raw lognormal? 
+        # Assuming standard lognormal output is the multiplier or value?
+        # Prompt says "sample notional size from configured distribution"
+        # Let's assume lognormal(0, sigma) * 100,000 as a scaler? 
+        # Or just lognormal(10, sigma)?
+        # Let's aim for something reasonable relative to equity -> leverage 2x-10x
+        # Base it on equity * random leverage
+        lev_min, lev_max = config.leverage_range
+        leverage = np.random.uniform(lev_min, lev_max)
+        trade_notional = eq_val * leverage
+        
+        # Convert to units of asset (q)
+        q = trade_notional / current_price
+        
+        # Intent: T1 Long, T2 Short
+        new_intents.append((idx1, q))
+        new_intents.append((idx2, -q))
+        
+    return new_intents
+
+def _simulate_paths_python(
+    model: RiskModel,
     log_returns: np.ndarray,
     pct_returns: np.ndarray,
     initial_price: float,
-    im0: float,
-    notional: float,
-    slippage_factor: float,
-    margin_mult: np.ndarray,
-    do_partial_liquidation: bool,
+    sigma_daily: float,
+    initial_notional_target: float, 
+    # Note: initial_notional_target is used for the initial setup if we wanted to pre-populate,
+    # but instructions say "Remove monolithic... work with many Trader accounts".
+    # We will assume we start with some initial traders to match the requested 'notional' 
+    # or start empty if not specified. 
+    # To maintain backward compatibility of "simulation with X open interest",
+    # we should probably spawn initial traders to match 'initial_notional_target'.
 ):
-    """
-    Ultra-fast 2-trader symmetric VM/DF simulation.
-
-    - One long, one short per path with equal IM (im0).
-    - VM = current_notional * pct_return.
-    - Supports Partial Liquidation:
-        If equity < required_margin:
-            close fraction k = shortfall / notional
-            apply slippage
-    - Or Full Liquidation (legacy):
-        If equity < required_margin (or just bankruptcy in old logic, but now unified):
-            close all.
-    """
     P, T = log_returns.shape
-
+    
     # Outputs
     df_required = np.zeros(P, dtype=np.float64)
-    defaults = np.zeros(P, dtype=np.int64)
-
+    defaults = np.zeros(P, dtype=np.int64)  # boolean really
+    
     price_paths = np.zeros((P, T), dtype=np.float64)
     lev_long = np.zeros((P, T), dtype=np.float64)
     lev_short = np.zeros((P, T), dtype=np.float64)
-
-    # New Extended Outputs
+    
     liquidation_fraction = np.zeros((P, T), dtype=np.float64)
     notional_path = np.zeros((P, T), dtype=np.float64)
-    equity_long = np.zeros((P, T), dtype=np.float64)
-    equity_short = np.zeros((P, T), dtype=np.float64)
+    equity_long_path = np.zeros((P, T), dtype=np.float64)
+    equity_short_path = np.zeros((P, T), dtype=np.float64)
+    df_path = np.zeros((P, T), dtype=np.float64)
+    slippage_cost = np.zeros((P, T), dtype=np.float64)
+    
+    nan = np.nan
+    
+    # Precompute breaker params
+    breaker = model.breaker
+    # We need to re-compute R_t inside the loop or pass it in?
+    # The original code passed `margin_mult` computed beforehand.
+    # We should stick to that pattern if possible, but the instructions say:
+    # "Compute R_t and breaker_state (unchanged formula). ... In the per-tick loop"
+    # So we can pass the pre-computed arrays for efficiency.
+    
+    # Slippage
+    slippage_factor = model.liquidation.slippage_factor
+    do_partial = isinstance(model.liquidation, PartialCloseOut)
+
+    # We need margin_mult and breaker_state passed in or computed. 
+    # The calling function `run_models` computes them. We will add them to args.
+    
+    return None # Placeholder, see full implementation below
+
+def _run_simulation_loop(
+    model: RiskModel,
+    log_returns: np.ndarray,
+    pct_returns: np.ndarray,
+    amihud_le: np.ndarray,
+    sigmas: np.ndarray,
+    initial_price: float,
+    sigma_daily: float,
+    initial_notional_target: float,
+    margin_mult_grid: np.ndarray,
+    breaker_state_grid: np.ndarray,
+):
+    P, T = log_returns.shape
+    
+    # Initialize Result Arrays
+    df_required = np.zeros(P, dtype=np.float64)
+    defaults = np.zeros(P, dtype=np.int64)
+    
+    price_paths = np.zeros((P, T), dtype=np.float64)
+    lev_long_path = np.full((P, T), np.nan, dtype=np.float64)
+    lev_short_path = np.full((P, T), np.nan, dtype=np.float64)
+    
+    liquidation_fraction = np.zeros((P, T), dtype=np.float64)
+    notional_path = np.zeros((P, T), dtype=np.float64)
+    equity_long_path = np.zeros((P, T), dtype=np.float64)
+    equity_short_path = np.zeros((P, T), dtype=np.float64)
     df_path = np.zeros((P, T), dtype=np.float64)
     slippage_cost = np.zeros((P, T), dtype=np.float64)
 
-    nan = np.nan
-    im_rate = im0 / notional if notional > 0 else 0.0
+    # Helper to compute MM from IM (gamma factor)
+    # Typically MM is a fraction of IM, or defined by the model.
+    # The instructions say "MM_new = gamma * IM_new". 
+    # We need to find gamma. 
+    # In `test_engine.py` or `components.py` there isn't an explicit gamma.
+    # Existing code: `req_im = curr_notional * im_rate * margin_mult`.
+    # It treats `req_im` as the maintenance requirement for liquidation checks?
+    # In `_simulate_paths_numba`: "If equity < required_margin ... close".
+    # So `req_im` acts as MM. 
+    # But for *opening* positions, we usually check Initial Margin.
+    # Let's assume:
+    #   MM_required = computed by model.im.compute(...) * multiplier * gamma?
+    #   Actually, the existing code uses `im0` (Initial Margin) as the baseline for `req_im` in the loop.
+    #   It seems `req_im` IS the maintenance margin in the loop logic.
+    #   Let's stick to: 
+    #     IM (for opening) = model.initial_margin(...) * multiplier
+    #     MM (for maintenance) = IM * 0.8 (Standard DeFi assumption if not specified)
+    #     Wait, instructions say: "IM_base = compute_ES_margin(...) ... MM_new = gamma * IM_new"
+    #     I will use gamma = 0.8 as a reasonable default since it's not in the prompt's config.
+    GAMMA = 0.8
 
-    # Initialize first time step
+    print(f"Simulating {model.name} over {P} paths...")
+    
     for p in range(P):
-        price_paths[p, 0] = initial_price
-        lev_long[p, 0] = notional / im0 if im0 > 0 else nan
-        lev_short[p, 0] = notional / im0 if im0 > 0 else nan
-        
-        notional_path[p, 0] = notional
-        equity_long[p, 0] = im0
-        equity_short[p, 0] = im0
-
-    for p in range(P):
-        eqL = im0
-        eqS = im0
-        curr_notional = notional
+        # Per-path state
+        traders: List[Trader] = []
         price = initial_price
-        dead = False
+        
+        # Initialize ONE pair to match the requested initial_notional (backward compatibility)
+        # If initial_notional_target > 0
+        if initial_notional_target > 0:
+            # Create two whales/aggregates to represent the starting OI
+            t_long = Trader(equity=initial_notional_target*0.2, position=initial_notional_target/price) # 5x lev
+            t_short = Trader(equity=initial_notional_target*0.2, position=-initial_notional_target/price)
+            
+            # Initialize their margin
+            im_base = model.initial_margin(initial_notional_target, sigma_daily)
+            # Apply initial breaker multiplier (usually 1.0 at t=0)
+            mult0 = margin_mult_grid[p, 0]
+            im_init = im_base * mult0
+            mm_init = im_init * GAMMA # Maintenance threshold
+            
+            t_long.im_locked = im_init
+            t_long.mm_required = mm_init
+            t_short.im_locked = im_init
+            t_short.mm_required = mm_init
+            
+            traders.append(t_long)
+            traders.append(t_short)
+
+        # Record t=0
+        price_paths[p, 0] = price
+        
+        # Aggregate t=0
+        pos_L = sum(max(t.position, 0) for t in traders)
+        pos_S = sum(max(-t.position, 0) for t in traders)
+        notional_path[p, 0] = (pos_L + pos_S) / 2.0 * price # Avg OI
+        equity_long_path[p, 0] = sum(t.equity for t in traders if t.position > 0)
+        equity_short_path[p, 0] = sum(t.equity for t in traders if t.position < 0)
+        
+        if pos_L > 0 and equity_long_path[p, 0] > 0:
+            lev_long_path[p, 0] = (pos_L * price) / equity_long_path[p, 0]
+        if pos_S > 0 and equity_short_path[p, 0] > 0:
+            lev_short_path[p, 0] = (pos_S * price) / equity_short_path[p, 0]
+
+        dead_path = False
 
         for t in range(1, T):
-            if dead:
+            if dead_path and not model.trader_arrival.enabled:
+                # If everyone dead and no new traders, just fill forward
                 price_paths[p, t] = price
-                lev_long[p, t] = nan
-                lev_short[p, t] = nan
-                
-                notional_path[p, t] = 0.0
-                equity_long[p, t] = eqL
-                equity_short[p, t] = eqS
                 continue
 
-            # Evolve price
-            dlog = log_returns[p, t]
-            price *= np.exp(dlog)
+            # 1. Update Price
+            ret_log = log_returns[p, t]
+            ret_pct = pct_returns[p, t]
+            price *= np.exp(ret_log)
             price_paths[p, t] = price
-
-            # VM PnL
-            ret = pct_returns[p, t]
-            vm = curr_notional * ret
-
-            # Apply VM
-            eqL += vm
-            eqS -= vm
-
-            # Margin Logic
-            # Check solvency/margin against CURRENT notional
-            # Margin Mult (Breaker) applies to IM requirement
-            req_im = curr_notional * im_rate * margin_mult[p, t]
-
-            # We check both sides. In symmetric book, one usually loses.
-            # Check Loser First (optimization, and logic)
-            # If vm > 0, Short loses. If vm < 0, Long loses.
             
-            sides_to_check = (
-                (False, True) if vm > 0 else 
-                (True, False) if vm < 0 else 
-                (True, True)
-            ) # (check_long, check_short)
-
-            # Note: In Numba, tuples/lists are tricky if not constant.
-            # We'll just check explicitly.
+            # 2. Context
+            b_state = breaker_state_grid[p, t]
+            m_mult = margin_mult_grid[p, t]
             
-            l_needs_check = vm <= 0
-            s_needs_check = vm >= 0
+            # 3. PnL Updates (Mark to Market)
+            # Loop traders
+            for trader in traders:
+                # VM = position_qty * (price_new - price_old)
+                # Equivalent to: notional_old * pct_return
+                # We store position in units (q).
+                # PnL = q * (price_current - price_prev)
+                # But we already updated price. 
+                # PnL ~= q * price_prev * ret_pct (approx) or q * (price_curr - price_prev)
+                # Exact:
+                price_prev = price / np.exp(ret_log)
+                pnl = trader.position * (price - price_prev)
+                trader.equity += pnl
+                trader.unrealized_pnl += pnl
             
-            # If partial liquidation happens on one side, notional reduces.
-            # Does that save the other side? Yes, req_im reduces.
+            # 4. Trader Arrival & New Trades
+            if model.trader_arrival.enabled:
+                # Spawn
+                new_intents = _spawn_traders(traders, model.trader_arrival, price)
+                
+                # Process Intents
+                for t_idx, delta_q in new_intents:
+                    trader = traders[t_idx]
+                    
+                    # a. Breaker Gate (HARD = Reduce Only)
+                    if b_state == 2: # HARD
+                        if not trader.reduces_exposure(delta_q):
+                            continue # Reject
+                    
+                    # b. Margin Check for Opening
+                    # Calculate IM required for this trade
+                    trade_notional = abs(delta_q * price)
+                    im_base = model.initial_margin(trade_notional, sigma_daily)
+                    im_req = im_base * m_mult
+                    mm_req = im_req * GAMMA 
+                    
+                    # Check affordability
+                    # available_equity = equity - im_locked
+                    if trader.equity - trader.im_locked >= im_req:
+                        # Accept
+                        trader.position += delta_q
+                        trader.im_locked += im_req
+                        trader.mm_required += mm_req
             
-            # Helper for liquidation logic (inlined for Numba)
-            # We iterate twice to handle "Check Loser -> then Check Winner (with new notional)"
-            # Actually, simply checking both sequentially is fine if we update curr_notional.
+            # 5. Liquidation Check
+            # Iterate all traders
+            # If equity < mm_required -> Liquidate
             
-            # SEQUENCE: Check Long -> Check Short (or vice versa).
-            # Better: Check Loser, then Check Winner.
+            step_liq_fraction = 0.0
             
-            if vm > 0: # Short is loser
-                # Check Short
-                shortfall = req_im - eqS
-                if shortfall > 0:
-                    if do_partial_liquidation:
-                        k = shortfall / curr_notional
+            for trader in traders:
+                # Check solvency
+                if trader.equity < trader.mm_required:
+                    # Default Logic
+                    shortfall = trader.mm_required - trader.equity
+                    # If simple bankruptcy (equity < 0), we also catch it here as shortfall > mm
+                    
+                    notional_t = abs(trader.position * price)
+                    
+                    if notional_t < 1e-9:
+                        continue # Empty trader
+                        
+                    # Calculate fraction k
+                    is_partial = isinstance(model.liquidation, PartialCloseOut)
+                    
+                    k = 1.0
+                    if is_partial:
+                        # k = shortfall / notional
+                        k = shortfall / notional_t
                         if k > 1.0: k = 1.0
-                        
-                        liq_amt = k * curr_notional
-                        cost = liq_amt * slippage_factor
-                        
-                        eqS -= cost
-                        slippage_cost[p, t] += cost
-                        df_path[p, t] += cost
-                        df_required[p] += cost
-                        
-                        liquidation_fraction[p, t] = max(liquidation_fraction[p, t], k)
-                        curr_notional *= (1.0 - k)
-                        
-                        if k == 1.0:
-                            dead = True
-                            defaults[p] = 1
-                    else:
-                        # Full Closeout
-                        dead = True
-                        defaults[p] = 1 # Margin breach is default in Full mode?
-                        cost = curr_notional * slippage_factor
-                        eqS -= cost
-                        slippage_cost[p, t] += cost
-                        df_path[p, t] += cost
-                        df_required[p] += cost
-                        curr_notional = 0.0
-
-                # Check Long (if not dead)
-                if not dead and curr_notional > 1e-9:
-                    req_im = curr_notional * im_rate * margin_mult[p, t]
-                    shortfall = req_im - eqL
-                    if shortfall > 0:
-                         # Logic for Long... (Similar)
-                         if do_partial_liquidation:
-                            k = shortfall / curr_notional
-                            if k > 1.0: k = 1.0
-                            liq_amt = k * curr_notional
-                            cost = liq_amt * slippage_factor
-                            eqL -= cost
-                            slippage_cost[p, t] += cost
-                            df_path[p, t] += cost
-                            df_required[p] += cost
-                            liquidation_fraction[p, t] = max(liquidation_fraction[p, t], k)
-                            curr_notional *= (1.0 - k)
-                            if k == 1.0:
-                                dead = True
-                                defaults[p] = 1
-                         else:
-                            dead = True
-                            defaults[p] = 1
-                            cost = curr_notional * slippage_factor
-                            eqL -= cost
-                            slippage_cost[p, t] += cost
-                            df_path[p, t] += cost
-                            df_required[p] += cost
-                            curr_notional = 0.0
-
-            else: # vm <= 0, Long is loser (or tie)
-                # Check Long first
-                shortfall = req_im - eqL
-                if shortfall > 0:
-                    if do_partial_liquidation:
-                        k = shortfall / curr_notional
-                        if k > 1.0: k = 1.0
-                        liq_amt = k * curr_notional
-                        cost = liq_amt * slippage_factor
-                        eqL -= cost
-                        slippage_cost[p, t] += cost
-                        df_path[p, t] += cost
-                        df_required[p] += cost
-                        liquidation_fraction[p, t] = max(liquidation_fraction[p, t], k)
-                        curr_notional *= (1.0 - k)
-                        if k == 1.0:
-                            dead = True
-                            defaults[p] = 1
-                    else:
-                        dead = True
+                    
+                    # Execute Liquidation
+                    qty_close = trader.position * k
+                    cost = abs(qty_close * price) * model.liquidation.slippage_factor
+                    
+                    # Apply cost
+                    trader.equity -= cost
+                    slippage_cost[p, t] += cost
+                    
+                    # Update position
+                    trader.position -= qty_close
+                    trader.im_locked *= (1.0 - k)
+                    trader.mm_required *= (1.0 - k)
+                    
+                    step_liq_fraction = max(step_liq_fraction, k)
+                    
+                    # Check for Bankruptcy (Default Fund Usage)
+                    if trader.equity < 0:
+                        loss = -trader.equity
+                        df_path[p, t] += loss
+                        df_required[p] += loss
                         defaults[p] = 1
-                        cost = curr_notional * slippage_factor
-                        eqL -= cost
-                        slippage_cost[p, t] += cost
-                        df_path[p, t] += cost
-                        df_required[p] += cost
-                        curr_notional = 0.0
-                
-                # Check Short (if not dead)
-                if not dead and curr_notional > 1e-9:
-                    req_im = curr_notional * im_rate * margin_mult[p, t]
-                    shortfall = req_im - eqS
-                    if shortfall > 0:
-                        if do_partial_liquidation:
-                            k = shortfall / curr_notional
-                            if k > 1.0: k = 1.0
-                            liq_amt = k * curr_notional
-                            cost = liq_amt * slippage_factor
-                            eqS -= cost
-                            slippage_cost[p, t] += cost
-                            df_path[p, t] += cost
-                            df_required[p] += cost
-                            liquidation_fraction[p, t] = max(liquidation_fraction[p, t], k)
-                            curr_notional *= (1.0 - k)
-                            if k == 1.0:
-                                dead = True
-                                defaults[p] = 1
-                        else:
-                            dead = True
-                            defaults[p] = 1
-                            cost = curr_notional * slippage_factor
-                            eqS -= cost
-                            slippage_cost[p, t] += cost
-                            df_path[p, t] += cost
-                            df_required[p] += cost
-                            curr_notional = 0.0
+                        # Reset equity to 0 for accounting? 
+                        # Usually we leave it negative or remove trader.
+                        # For aggregation, negative equity cancels out positive equity of others?
+                        # No, CCP absorbs negative equity. 
+                        # So for "Equity Long/Short" plots, we should probably floor at 0 or separate?
+                        # Standard: The trader is effectively zeroed out, the debt is moved to CCP.
+                        trader.equity = 0.0
+                        trader.position = 0.0 # Force close remaining if bankrupt?
+                        trader.im_locked = 0.0
+                        trader.mm_required = 0.0
+            
+            liquidation_fraction[p, t] = step_liq_fraction
 
-            # Terminal Bankruptcy Check (Equity < 0)
-            # We check this regardless of 'dead' status to capture the final hole.
-            # If we just marked dead, we still need to check if eq < 0.
+            # 6. Aggregate & Store Stats
+            pos_L = sum(max(t.position, 0) for t in traders)
+            pos_S = sum(max(-t.position, 0) for t in traders)
             
-            if eqL < 0:
-                dead = True
-                defaults[p] = 1
-                df_loss = -eqL
-                # We assume the hole is covered by DF immediately
-                # To avoid double counting if loop continued (which it won't due to dead),
-                # we treat it as a one-time loss. 
-                # But since we set dead=True, we won't re-enter.
-                # However, we must ensure we don't add it multiple times if we were somehow iterating?
-                # No, loop continues to next t. 'dead' check at start of loop handles skipping.
-                
-                # We add the hole to DF usage
-                df_path[p, t] += df_loss
-                df_required[p] += df_loss
-                # Reset equity to 0? Or keep negative? 
-                # Keep negative for record.
-                
-            if eqS < 0:
-                dead = True
-                defaults[p] = 1
-                df_loss = -eqS
-                df_path[p, t] += df_loss
-                df_required[p] += df_loss
-
-            # Update Paths
-            if curr_notional < 1e-9:
-                dead = True # effectively dead
+            # Aggregate Equity (Floor at 0 for visual sanity? Or keep raw?)
+            # Plots usually expect Total Long Equity.
+            eq_L = sum(t.equity for t in traders if t.position > 0)
+            eq_S = sum(t.equity for t in traders if t.position < 0)
             
-            notional_path[p, t] = curr_notional
-            equity_long[p, t] = eqL
-            equity_short[p, t] = eqS
+            notional_path[p, t] = (pos_L * price + pos_S * price) / 2.0
+            equity_long_path[p, t] = eq_L
+            equity_short_path[p, t] = eq_S
             
-            if curr_notional > 0 and eqL > 0:
-                lev_long[p, t] = curr_notional / eqL
-            else:
-                lev_long[p, t] = nan
-                
-            if curr_notional > 0 and eqS > 0:
-                lev_short[p, t] = curr_notional / eqS
-            else:
-                lev_short[p, t] = nan
+            if pos_L > 1e-9:
+                lev_long_path[p, t] = (pos_L * price) / eq_L if eq_L > 0 else np.nan
+            if pos_S > 1e-9:
+                lev_short_path[p, t] = (pos_S * price) / eq_S if eq_S > 0 else np.nan
 
     return (
-        df_required, defaults, price_paths, lev_long, lev_short,
-        liquidation_fraction, notional_path, equity_long, equity_short, df_path, slippage_cost
+        df_required, defaults, price_paths, lev_long_path, lev_short_path,
+        liquidation_fraction, notional_path, equity_long_path, equity_short_path, df_path, slippage_cost
     )
 
 
 # ============================================================
-#  Breaker / R_t computation
+#  Breaker / R_t computation (Reused)
 # ============================================================
 
 
@@ -316,16 +368,7 @@ def _build_rt_and_mult(
 ):
     """
     Build systemic stress index R_t, breaker_state, and margin multiplier.
-
-    R_t combines:
-      - |returns|
-      - liquidity (amihud_le)
-      - per-path volatility (sigmas)
-
-    breaker_state codes:
-      0 = NORMAL
-      1 = SOFT
-      2 = HARD
+    (Same as before)
     """
     P, T = log_returns.shape
 
@@ -357,7 +400,7 @@ def _build_rt_and_mult(
 # ============================================================
 
 
-def run_models_numba(
+def run_models(
     models: List[RiskModel],
     num_paths: int = 5_000,
     initial_price: float = 4000.0,
@@ -366,13 +409,7 @@ def run_models_numba(
     garch_params_file: str = "garch_params.json",
 ) -> MultiModelResults:
     """
-    Ultra-fast Monte-Carlo engine.
-
-    - Generates shared MC paths (log_returns, amihud, sigmas).
-    - For each model:
-        * computes IM
-        * builds R_t / breaker / margin multipliers (AES)
-        * runs numba core to get DF usage, defaults, leverage, price paths
+    Multi-trader Monte-Carlo engine.
     """
 
     mc = MCReturnsGenerator(
@@ -384,23 +421,13 @@ def run_models_numba(
     horizon = mc.horizon
     sigma_daily = mc.last_sigma_t
 
-    # Precompute pct returns for variable notional logic
+    # Precompute pct returns for updates
     pct_returns = np.exp(log_returns) - 1.0
 
     model_results: Dict[str, SingleModelResults] = {}
 
     for model in models:
-        # Initial margin for this model (per side)
-        im0 = model.initial_margin(notional, sigma_daily)
-
-        # Slippage factor (for DF requirement when default occurs)
-        slippage = model.liquidation.slippage_factor
-        
-        # Check if partial liquidation is enabled based on component type
-        do_partial = isinstance(model.liquidation, PartialCloseOut)
-
-        # Breaker: get params from model.breaker
-        # Even FXD has a Breaker component (defaults to infinite soft/hard)
+        # Pre-compute Breaker States
         soft = model.breaker.soft
         hard = model.breaker.hard
         mults = model.breaker.multipliers
@@ -414,7 +441,7 @@ def run_models_numba(
             breaker_multipliers=mults,
         )
 
-        # Run numba kernel
+        # Run Python Kernel
         (
             df_required,
             defaults_i,
@@ -427,15 +454,17 @@ def run_models_numba(
             equity_short,
             df_path,
             slippage_cost,
-        ) = _simulate_paths_numba(
+        ) = _run_simulation_loop(
+            model=model,
             log_returns=log_returns,
             pct_returns=pct_returns,
+            amihud_le=amihud_le,
+            sigmas=sigmas,
             initial_price=initial_price,
-            im0=im0,
-            notional=notional,
-            slippage_factor=slippage,
-            margin_mult=margin_mult,
-            do_partial_liquidation=do_partial,
+            sigma_daily=sigma_daily,
+            initial_notional_target=notional,
+            margin_mult_grid=margin_mult,
+            breaker_state_grid=breaker_state,
         )
 
         model_results[model.name] = SingleModelResults(

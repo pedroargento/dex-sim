@@ -1,6 +1,6 @@
 # risk_sim/models/components.py
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 from scipy.stats import t
@@ -91,3 +91,35 @@ class PartialCloseOut(LiquidationStrategy):
     
     # Placeholder for any specific partial logic if needed outside Numba
     # In this architecture, the Numba engine handles the 'how' based on type check or flag
+
+
+# ---------- Trader Entities ----------
+
+class Trader:
+    def __init__(self, equity: float, position: float = 0.0):
+        self.equity = equity
+        self.position = position  # >0 long, <0 short
+        self.im_locked = 0.0
+        self.mm_required = 0.0
+        self.realized_pnl = 0.0
+        self.unrealized_pnl = 0.0
+
+    def reduces_exposure(self, delta_q: float) -> bool:
+        # True if trade moves position toward zero, not further away
+        # If position is 0, any trade increases exposure (returns False)
+        if self.position == 0.0:
+            return False
+        return (self.position > 0 and delta_q < 0) or (self.position < 0 and delta_q > 0)
+
+@dataclass
+class TraderArrival:
+    """
+    Configuration for trader arrival and trade intent.
+    """
+    enabled: bool = False
+    pairs_per_tick: int = 0
+    notional_distribution: str = "lognormal"
+    notional_dist_params: dict = field(default_factory=lambda: {"sigma": 1.0})
+    equity_distribution: str = "fixed"
+    equity_dist_params: dict = field(default_factory=lambda: {"value": 10000.0})
+    leverage_range: tuple = (2.0, 10.0)

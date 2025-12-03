@@ -5,14 +5,13 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from dex_sim.plotting import (
     plot_df_survival_curve,
-    plot_model_comparison_violins,
+    plot_comparison_dashboard,
     plot_efficiency_frontier,
-    plot_regime_dynamics,
+    plot_system_dashboard,
+    plot_microstructure_explorer,
+    plot_symmetry_diagnostics,
     plot_liquidation_heatmap,
-    plot_notional_fan_chart,
-    plot_slippage_waterfall,
     plot_worst_case_autopsy,
-    plot_mc_convergence,
     plot_all
 )
 from dex_sim.data_structures import MultiModelResults, SingleModelResults
@@ -47,7 +46,9 @@ def dummy_results(tmp_path):
         notional_paths=notional1,
         equity_long=eq1,
         equity_short=eq1,
-        slippage_cost=np.random.uniform(0, 10, (P, T))
+        slippage_cost=np.random.uniform(0, 10, (P, T)),
+        ecp_position_path=np.random.uniform(-10, 10, (P, T)),
+        ecp_slippage_cost=np.random.uniform(0, 1, P)
     )
     
     # Model 2: FXD
@@ -84,31 +85,31 @@ def test_plotting_functions_run_without_error(dummy_results):
     plot_df_survival_curve(multi_res, outdir)
     assert os.path.exists(os.path.join(outdir, "solvency_survival_curve.png"))
     
-    plot_model_comparison_violins(multi_res, outdir)
-    assert os.path.exists(os.path.join(outdir, "df_distribution_violins.png"))
+    plot_comparison_dashboard(multi_res, outdir)
+    assert os.path.exists(os.path.join(outdir, "comparison_df_boxplot.png"))
+    assert os.path.exists(os.path.join(outdir, "comparison_leverage_violin.png"))
     
     plot_efficiency_frontier(multi_res, outdir)
     assert os.path.exists(os.path.join(outdir, "efficiency_frontier.png"))
-    
-    plot_mc_convergence(multi_res, outdir)
-    assert os.path.exists(os.path.join(outdir, "mc_convergence.png"))
     
     # Test per-model charts (AES)
     aes_res = multi_res.models["AES"]
     aes_dir = os.path.join(outdir, "AES")
     os.makedirs(aes_dir, exist_ok=True)
     
-    plot_regime_dynamics(aes_res, aes_dir)
-    assert os.path.exists(os.path.join(aes_dir, "AES_regime_dynamics.png"))
+    # New Dashboards
+    plot_system_dashboard(aes_res, aes_dir)
+    assert os.path.exists(os.path.join(aes_dir, "AES_system_dashboard.png"))
     
+    plot_microstructure_explorer(aes_res, aes_dir)
+    # Risk diamond might not generate if no granular data, but function should run
+    
+    plot_symmetry_diagnostics(aes_res, aes_dir)
+    assert os.path.exists(os.path.join(aes_dir, "AES_symmetry_diagnostics.png"))
+    
+    # Legacy / Specific
     plot_liquidation_heatmap(aes_res, aes_dir)
     assert os.path.exists(os.path.join(aes_dir, "AES_liquidation_heatmap.png"))
-    
-    plot_notional_fan_chart(aes_res, aes_dir)
-    assert os.path.exists(os.path.join(aes_dir, "AES_notional_fan.png"))
-    
-    plot_slippage_waterfall(aes_res, aes_dir)
-    assert os.path.exists(os.path.join(aes_dir, "AES_cost_composition.png"))
     
     plot_worst_case_autopsy(aes_res, aes_dir)
     assert os.path.exists(os.path.join(aes_dir, "AES_autopsy.png"))

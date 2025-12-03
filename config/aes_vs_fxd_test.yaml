@@ -1,18 +1,16 @@
 name: aes_vs_fxd_test
-paths: 300
+paths: 1500
 initial_price: 4000
-notional: 400000000
 stress_factor: 1.0
 garch_params: garch_params.json
 
 traders:
   count: 2000
-  initial_equity: 10000.0
-  initial_notional: symmetric
+  initial_equity: 50000.0
   behaviors:
-    expand_fraction: 0.9
+    expand_fraction: 0.5
     expand_rate: 0.01
-    reduce_fraction: 0.1
+    reduce_fraction: 0.5
     reduce_rate: 0.005
 
 models:

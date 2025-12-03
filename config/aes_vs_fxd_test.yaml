@@ -1,7 +1,7 @@
 name: aes_vs_fxd_test
 paths: 1500
 initial_price: 4000
-stress_factor: 1.0
+stress_factor: 1.5
 garch_params: garch_params.json
 
 traders:

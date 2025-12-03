@@ -304,10 +304,37 @@ def _run_simulation_loop_numba_columnar(
                     continue
 
                 eq_i = equities[p, i]
-                
-                # Refresh MM
                 pos_i = positions[p, i]
                 notional_i = abs(pos_i * price_p)
+                
+                # A. Auto-Flatten (Zombie Trader)
+                # If equity is negligible, force close immediately
+                if eq_i < 1e-8:
+                    # Slippage cost on full close
+                    cost = notional_i * slippage_factor
+                    
+                    # ECP Absorbs
+                    ecp_position[p] -= pos_i
+                    
+                    # DF takes the hit (equity is basically 0, so loss = cost)
+                    # Technically loss = cost - equity, but eq ~ 0.
+                    loss = cost - eq_i
+                    if loss > 0:
+                        df_required[p] += loss
+                        df_path[p, t] += loss
+                        defaults[p] = 1 # Count as default? Yes, insolvent exit.
+                    
+                    slippage_cost[p, t] += cost
+                    
+                    # Clear State
+                    equities[p, i] = 0.0
+                    positions[p, i] = 0.0
+                    im_locked[p, i] = 0.0
+                    mm_required[p, i] = 0.0
+                    is_active[p, i] = 0
+                    continue
+
+                # B. Margin Check
                 im_i = notional_i * im_rate
                 mm_i = im_i * GAMMA
                 
@@ -329,6 +356,7 @@ def _run_simulation_loop_numba_columnar(
                     qty_close = pos_i * k
                     cost = abs(qty_close * price_p) * slippage_factor
 
+                    # Update Trader
                     equities[p, i] = eq_i - cost
                     positions[p, i] = pos_i - qty_close
                     
@@ -336,6 +364,7 @@ def _run_simulation_loop_numba_columnar(
                     ecp_position[p] -= qty_close
                     
                     # Recalc margins after close
+                    # New IM/MM proportional to remaining pos
                     im_locked[p, i] = im_i * (1.0 - k)
                     mm_required[p, i] = mm_i * (1.0 - k)
 
@@ -344,6 +373,8 @@ def _run_simulation_loop_numba_columnar(
                     if k > step_liqs[p]:
                         step_liqs[p] = k
 
+                    # C. Insolvency Check (Gap Risk)
+                    # If equity is negative after partial close (or full close), default.
                     if equities[p, i] < 0.0:
                         loss = -equities[p, i]
                         df_required[p] += loss
@@ -351,7 +382,6 @@ def _run_simulation_loop_numba_columnar(
                         defaults[p] = 1
 
                         # Full remaining close out absorbed by ECP
-                        # Note: positions was already reduced by qty_close in partial step
                         remaining_pos = positions[p, i]
                         
                         equities[p, i] = 0.0

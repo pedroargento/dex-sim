@@ -58,6 +58,10 @@ class SingleModelResults:
     intent_accepted_reduce: Optional[np.ndarray] = None  # [P, T]
     intent_rejected: Optional[np.ndarray] = None  # [P, T]
 
+    # ECP Data
+    ecp_position_path: Optional[np.ndarray] = None  # [P, T]
+    ecp_slippage_cost: Optional[np.ndarray] = None  # [P]
+
     # Granular Data
     trader_lifetimes: Optional[np.ndarray] = None # [Total Traders across all paths]
     trader_snapshots: Optional[List[Dict[str, Any]]] = None # For scatter plots (sample or worst path)

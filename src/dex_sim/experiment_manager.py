@@ -13,7 +13,6 @@ from .models import (
     Breaker,
     FullCloseOut,
     PartialCloseOut,
-    TraderArrival,
 )
 from .results_io import save_results, load_results
 from .plotting import plot_all
@@ -44,6 +43,7 @@ def discover_runs(root: str = "results"):
 # Component Builders
 # ------------------------------------------------------------
 
+
 def build_im(cfg):
     t = cfg.get("type")
     if t == "es":
@@ -53,13 +53,15 @@ def build_im(cfg):
     else:
         raise ValueError(f"Unknown IM type: {t}")
 
+
 def build_breaker(cfg):
     # Default to infinite limits (no breaker) if not specified
     return Breaker(
-        soft = float(cfg.get("soft", float("inf"))),
-        hard = float(cfg.get("hard", float("inf"))),
-        multipliers = tuple(cfg.get("multipliers", [1.0, 1.0, 1.0])),
+        soft=float(cfg.get("soft", float("inf"))),
+        hard=float(cfg.get("hard", float("inf"))),
+        multipliers=tuple(cfg.get("multipliers", [1.0, 1.0, 1.0])),
     )
+
 
 def build_liquidation(cfg):
 
@@ -76,33 +78,72 @@ def build_liquidation(cfg):
     else:
 
         raise ValueError(f"Unknown liquidation type: {t}")
+def build_trader_pool(cfg: dict):
+    """
+    Construct fixed trader pool arrays.
+    Symmetric population: N must be even.
+    0..N/2-1: Primary
+    N/2..N-1: Mirror
+    """
+    traders_cfg = cfg.get("traders", {})
+    
+    # Backward compatibility / Default
+    N = int(traders_cfg.get("count", cfg.get("num_traders", 2000)))
+    
+    if N % 2 != 0:
+        print(f"[WARN] Trader count {N} is odd. Increasing to {N+1} for symmetry.")
+        N += 1
 
+    # Warn if old 'trader_arrival' is present
+    if "trader_arrival" in cfg:
+        print("[WARN] 'trader_arrival' config is deprecated and ignored. Using fixed trader pool.")
 
+    if "max_leverage" in traders_cfg:
+         print("[WARN] 'max_leverage' in trader config is deprecated and ignored. Leverage is governed by IM/MM.")
 
-
-
-def build_trader_arrival(cfg):
-
-    return TraderArrival(
-
-        enabled=cfg.get("enabled", False),
-
-        pairs_per_tick=cfg.get("pairs_per_tick", 0),
-
-        notional_distribution=cfg.get("notional_distribution", "lognormal"),
-
-        notional_dist_params=cfg.get("notional_dist_params", {}),
-
-        equity_distribution=cfg.get("equity_distribution", "fixed"),
-
-        equity_dist_params=cfg.get("equity_dist_params", {}),
-
-        leverage_range=tuple(cfg.get("leverage_range", [2.0, 10.0])),
-
+    # Initialize arrays
+    # pool_arrival_tick is irrelevant now, all start at 0
+    pool_arrival_tick = np.zeros(N, dtype=np.int64)
+    
+    # Initial Notional is 0. All traders start flat.
+    # We keep the array for kernel compatibility but zero it out.
+    pool_notional = np.zeros(N, dtype=np.float64)
+    
+    # Direction is implicit in symmetry logic (Primary vs Mirror), 
+    # but we can keep an array if needed. For now, zeros.
+    pool_direction = np.zeros(N, dtype=np.float64)
+    
+    # Equity
+    init_equity = float(traders_cfg.get("initial_equity", 10000.0))
+    pool_equity = np.full(N, init_equity, dtype=np.float64)
+    
+    # Behaviors
+    # Config: behaviors: { expand_fraction: 0.5 }
+    behaviors_cfg = traders_cfg.get("behaviors", {})
+    expand_frac = float(behaviors_cfg.get("expand_fraction", 0.5))
+    
+    pool_behavior_id = np.zeros(N, dtype=np.int64) 
+    
+    # Assign behaviors to Primary traders (0 to N/2 - 1)
+    half_N = N // 2
+    num_expanders_half = int(half_N * expand_frac)
+    
+    # 0 = Expander, 1 = Reducer
+    # First num_expanders_half get 0, rest get 1
+    # Mirror traders (N/2 to N-1) copy their primary counterpart
+    
+    for i in range(half_N):
+        bid = 0 if i < num_expanders_half else 1
+        pool_behavior_id[i] = bid
+        pool_behavior_id[i + half_N] = bid
+    
+    return (
+        pool_arrival_tick,
+        pool_notional,
+        pool_direction,
+        pool_equity,
+        pool_behavior_id
     )
-
-
-
 
 
 # ------------------------------------------------------------
@@ -112,22 +153,13 @@ def build_trader_arrival(cfg):
 # ------------------------------------------------------------
 
 
-
-
-
-def build_model(mcfg: dict, global_trader_arrival_cfg: dict = None):
+def build_model(mcfg: dict):
     """Build a RiskModel from a YAML model config."""
-    # Prefer model-specific trader_arrival, fallback to global
-    ta_cfg = mcfg.get("trader_arrival", global_trader_arrival_cfg)
-    if ta_cfg is None:
-        ta_cfg = {}
-
     return RiskModel(
         name=mcfg["name"],
         im=build_im(mcfg["im"]),
         breaker=build_breaker(mcfg.get("breaker", {})),
         liquidation=build_liquidation(mcfg.get("liquidation", {})),
-        trader_arrival=build_trader_arrival(ta_cfg),
         backend=mcfg.get("backend", "python"),
     )
 
@@ -146,11 +178,8 @@ def run_experiment_from_config(config_file: str, root: str = "results") -> str:
     outdir = os.path.join(root, rid)
     ensure_dir(outdir)
 
-    # Global settings
-    global_trader_arrival = cfg.get("trader_arrival", {})
-
     # Build models
-    models = [build_model(m, global_trader_arrival) for m in cfg["models"]]
+    models = [build_model(m) for m in cfg["models"]]
 
     # Simulation parameters
     num_paths = cfg.get("paths", 5000)
@@ -159,26 +188,11 @@ def run_experiment_from_config(config_file: str, root: str = "results") -> str:
     seed = cfg.get("seed", 42)
     garch_params = cfg.get("garch_params", "garch_params.json")
 
-    # Notional: NEW API
-    notional = cfg.get("notional")
-    if notional is None:
-        # Backward compatibility: allow total_oi * oi_fraction, but warn
-        total_oi = cfg.get("total_oi")
-        oi_fraction = cfg.get("oi_fraction")
-        if total_oi is not None and oi_fraction is not None:
-            print(
-                "[WARN] `total_oi` + `oi_fraction` are deprecated. "
-                "Please specify `notional` directly in the config."
-            )
-            notional = float(total_oi) * float(oi_fraction)
-        else:
-            raise ValueError(
-                "Config must include `notional` (position size). "
-                "Old `total_oi`+`oi_fraction` interface is deprecated."
-            )
+    if "notional" in cfg:
+        print("[WARN] 'notional' in global config is deprecated. OI emerges endogenously.")
 
-    # partial_liquidation is no longer a global flag
-    # It is determined per-model by its liquidation component
+    # Build Trader Pool
+    pool_data = build_trader_pool(cfg)
 
     np.random.seed(seed)
 
@@ -187,16 +201,17 @@ def run_experiment_from_config(config_file: str, root: str = "results") -> str:
     print(f"Run ID: {rid}")
     print(f"Models: {[m.name for m in models]}")
     print(f"Paths: {num_paths}")
-    print(f"Notional per side: {notional:,.0f}")
     print(f"Stress factor: {stress_factor}")
+    print(f"Traders: {len(pool_data[0])} (Symmetric Pool)")
     print()
 
     # Run simulation
     results = run_models(
         models=models,
+        trader_pool=pool_data,
+        trader_pool_config=cfg.get("traders", {}),
         num_paths=num_paths,
         initial_price=initial_price,
-        notional=notional,
         stress_factor=stress_factor,
         garch_params_file=garch_params,
     )

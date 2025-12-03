@@ -7,5 +7,4 @@ from .components import (
     FullCloseOut, 
     PartialCloseOut,
     LiquidationStrategy,
-    TraderArrival
 )

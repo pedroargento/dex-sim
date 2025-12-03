@@ -1,4 +1,5 @@
 import argparse
+import sys
 
 from .experiment_manager import (
     run_experiment_from_config,
@@ -40,6 +41,9 @@ def main():
     )
 
     args = parser.parse_args()
+    
+    # Debug
+    print(f"DEBUG: cmd={args.cmd}")
 
     if args.cmd == "run":
         run_experiment_from_config(args.config)
@@ -55,3 +59,7 @@ def main():
 
     else:
         parser.print_help()
+
+
+if __name__ == "__main__":
+    main()

@@ -13,7 +13,6 @@ from .models import (
     Breaker,
     FullCloseOut,
     PartialCloseOut,
-    TraderArrival,
 )
 from .results_io import save_results, load_results
 from .plotting import plot_all
@@ -44,6 +43,7 @@ def discover_runs(root: str = "results"):
 # Component Builders
 # ------------------------------------------------------------
 
+
 def build_im(cfg):
     t = cfg.get("type")
     if t == "es":
@@ -53,13 +53,15 @@ def build_im(cfg):
     else:
         raise ValueError(f"Unknown IM type: {t}")
 
+
 def build_breaker(cfg):
     # Default to infinite limits (no breaker) if not specified
     return Breaker(
-        soft = float(cfg.get("soft", float("inf"))),
-        hard = float(cfg.get("hard", float("inf"))),
-        multipliers = tuple(cfg.get("multipliers", [1.0, 1.0, 1.0])),
+        soft=float(cfg.get("soft", float("inf"))),
+        hard=float(cfg.get("hard", float("inf"))),
+        multipliers=tuple(cfg.get("multipliers", [1.0, 1.0, 1.0])),
     )
+
 
 def build_liquidation(cfg):
 
@@ -76,33 +78,61 @@ def build_liquidation(cfg):
     else:
 
         raise ValueError(f"Unknown liquidation type: {t}")
+def build_trader_pool(cfg: dict, notional_target: float):
+    """
+    Construct fixed trader pool arrays.
+    """
+    traders_cfg = cfg.get("traders", {})
+    
+    # Backward compatibility / Default
+    N = traders_cfg.get("count", cfg.get("num_traders", 2000))
+    
+    # Warn if old 'trader_arrival' is present
+    if "trader_arrival" in cfg:
+        print("[WARN] 'trader_arrival' config is deprecated and ignored. Using fixed trader pool.")
 
+    # Initialize arrays
+    pool_arrival_tick = np.zeros(N, dtype=np.int64)
+    
+    # Directions: 50/50 split by default
+    # Indices 0, 2, 4... are Long (1.0)
+    # Indices 1, 3, 5... are Short (-1.0)
+    pool_direction = np.where(np.arange(N) % 2 == 0, 1.0, -1.0)
+    
+    # Notional
+    # We want total Long Notional ~ notional_target
+    # We want total Short Notional ~ notional_target
+    # Number of longs = N/2 (approx)
+    # per_trader = notional_target / (N/2)
+    per_trader_notional = notional_target / (N / 2.0)
+    pool_notional = np.full(N, per_trader_notional, dtype=np.float64)
+    
+    # Equity
+    init_equity = float(traders_cfg.get("initial_equity", 10000.0))
+    pool_equity = np.full(N, init_equity, dtype=np.float64)
+    
+    # Behaviors
+    # Default: 50% Expanders (0), 50% Reducers (1)
+    # Config: behaviors: { expand_fraction: 0.5 }
+    behaviors_cfg = traders_cfg.get("behaviors", {})
+    expand_frac = float(behaviors_cfg.get("expand_fraction", 0.5))
+    
+    if "max_leverage" in traders_cfg:
+         print("[WARN] 'max_leverage' in trader config is deprecated and ignored. Leverage is governed by IM/MM.")
 
-
-
-
-def build_trader_arrival(cfg):
-
-    return TraderArrival(
-
-        enabled=cfg.get("enabled", False),
-
-        pairs_per_tick=cfg.get("pairs_per_tick", 0),
-
-        notional_distribution=cfg.get("notional_distribution", "lognormal"),
-
-        notional_dist_params=cfg.get("notional_dist_params", {}),
-
-        equity_distribution=cfg.get("equity_distribution", "fixed"),
-
-        equity_dist_params=cfg.get("equity_dist_params", {}),
-
-        leverage_range=tuple(cfg.get("leverage_range", [2.0, 10.0])),
-
+    pool_behavior_id = np.zeros(N, dtype=np.int64) # Default 0 (Expander)
+    
+    # Set Reducers (1)
+    num_expanders = int(N * expand_frac)
+    pool_behavior_id[num_expanders:] = 1
+    
+    return (
+        pool_arrival_tick,
+        pool_notional,
+        pool_direction,
+        pool_equity,
+        pool_behavior_id
     )
-
-
-
 
 
 # ------------------------------------------------------------
@@ -112,22 +142,13 @@ def build_trader_arrival(cfg):
 # ------------------------------------------------------------
 
 
-
-
-
-def build_model(mcfg: dict, global_trader_arrival_cfg: dict = None):
+def build_model(mcfg: dict):
     """Build a RiskModel from a YAML model config."""
-    # Prefer model-specific trader_arrival, fallback to global
-    ta_cfg = mcfg.get("trader_arrival", global_trader_arrival_cfg)
-    if ta_cfg is None:
-        ta_cfg = {}
-
     return RiskModel(
         name=mcfg["name"],
         im=build_im(mcfg["im"]),
         breaker=build_breaker(mcfg.get("breaker", {})),
         liquidation=build_liquidation(mcfg.get("liquidation", {})),
-        trader_arrival=build_trader_arrival(ta_cfg),
         backend=mcfg.get("backend", "python"),
     )
 
@@ -146,11 +167,8 @@ def run_experiment_from_config(config_file: str, root: str = "results") -> str:
     outdir = os.path.join(root, rid)
     ensure_dir(outdir)
 
-    # Global settings
-    global_trader_arrival = cfg.get("trader_arrival", {})
-
     # Build models
-    models = [build_model(m, global_trader_arrival) for m in cfg["models"]]
+    models = [build_model(m) for m in cfg["models"]]
 
     # Simulation parameters
     num_paths = cfg.get("paths", 5000)
@@ -177,8 +195,8 @@ def run_experiment_from_config(config_file: str, root: str = "results") -> str:
                 "Old `total_oi`+`oi_fraction` interface is deprecated."
             )
 
-    # partial_liquidation is no longer a global flag
-    # It is determined per-model by its liquidation component
+    # Build Trader Pool
+    pool_data = build_trader_pool(cfg, notional)
 
     np.random.seed(seed)
 
@@ -189,11 +207,14 @@ def run_experiment_from_config(config_file: str, root: str = "results") -> str:
     print(f"Paths: {num_paths}")
     print(f"Notional per side: {notional:,.0f}")
     print(f"Stress factor: {stress_factor}")
+    print(f"Traders: {len(pool_data[0])} (Fixed Pool)")
     print()
 
     # Run simulation
     results = run_models(
         models=models,
+        trader_pool=pool_data,
+        trader_pool_config=cfg.get("traders", {}),
         num_paths=num_paths,
         initial_price=initial_price,
         notional=notional,

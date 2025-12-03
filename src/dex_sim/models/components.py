@@ -111,16 +111,3 @@ class Trader:
         if self.position == 0.0:
             return False
         return (self.position > 0 and delta_q < 0) or (self.position < 0 and delta_q > 0)
-
-@dataclass
-class TraderArrival:
-    """
-    Configuration for trader arrival and trade intent.
-    """
-    enabled: bool = False
-    pairs_per_tick: int = 0
-    notional_distribution: str = "lognormal"
-    notional_dist_params: dict = field(default_factory=lambda: {"sigma": 1.0})
-    equity_distribution: str = "fixed"
-    equity_dist_params: dict = field(default_factory=lambda: {"value": 10000.0})
-    leverage_range: tuple = (2.0, 10.0)

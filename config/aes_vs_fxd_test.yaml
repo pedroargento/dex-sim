@@ -1,17 +1,19 @@
 name: aes_vs_fxd_test
-paths: 5000
+paths: 300
 initial_price: 4000
 notional: 400000000
 stress_factor: 1.0
 garch_params: garch_params.json
 
-trader_arrival:
-  enabled: true
-  pairs_per_tick: 1
-  equity_distribution: fixed
-  equity_dist_params: 
-    value: 50000.0
-  leverage_range: [2.0, 10.0]
+traders:
+  count: 2000
+  initial_equity: 10000.0
+  initial_notional: symmetric
+  behaviors:
+    expand_fraction: 0.9
+    expand_rate: 0.01
+    reduce_fraction: 0.1
+    reduce_rate: 0.005
 
 models:
   - name: AES_es99
@@ -37,5 +39,5 @@ models:
       hard: .inf
       multipliers: [1.0, 1.0, 1.0]
     liquidation:
-      type: full
+      type: partial
       slippage: 0.001

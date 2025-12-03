@@ -16,7 +16,7 @@ It is designed for speed, accuracy, and flexibility, allowing researchers and de
 
 - **Pluggable Risk Models**: Build models by composing Initial Margin, Breaker, and Liquidation components.
 - **Numba-Powered Monte Carlo**: Blazing fast 🔥 simulation core JIT-compiled with Numba.
-- **Multi-Trader Engine**: Simulates heterogeneous trader populations with individual margins, leverage, and lifecycle events.
+- **Multi-Trader Engine**: Simulates a fixed pool of heterogeneous traders with individual margins, leverage, and behaviors.
 - **Systemic Stress Index (Rₜ)**: A composite index that tracks real-time market stress by combining volatility, liquidity, and return shocks.
 - **Circuit Breakers**: Implements a multi-state (NORMAL, SOFT, HARD) circuit breaker that dynamically adjusts margin multipliers in response to Rₜ.
 - **Variation Margin (VM) Default Modeling**: Accurately simulates scenarios where a trader's equity is wiped out, triggering a default.
@@ -35,7 +35,6 @@ It is designed for speed, accuracy, and flexibility, allowing researchers and de
 1.  **Initial Margin (IM)**: Determines the base margin requirement (e.g., `ES_IM` for dynamic risk, `FixedLeverageIM` for constant leverage).
 2.  **Breaker**: A Finite State Machine that monitors systemic stress ($R_t$) and applies multipliers to the IM requirement.
 3.  **Liquidation**: Defines how positions are closed when margin is breached (e.g., `FullCloseOut`, `PartialCloseOut`).
-4.  **Trader Arrival**: Configures the population dynamics (entry rate, leverage distribution, equity distribution).
 
 This architecture allows you to simulate almost any exchange design without writing new Python code.
 
@@ -44,13 +43,18 @@ This architecture allows you to simulate almost any exchange design without writ
 Models are defined in the `models` list of your experiment configuration file.
 
 ```yaml
-# Global Trader Configuration
-trader_arrival:
-  enabled: true
-  pairs_per_tick: 2
-  equity_distribution: fixed
-  equity_dist_params: {value: 10000}
-  leverage_range: [2, 20]
+# Global Trader Pool Configuration (Replaces old trader_arrival)
+traders:
+  count: 2000
+  initial_equity: 10000
+  initial_notional: symmetric # or value
+  behaviors:
+    momentum: 0.30
+    mean_revert: 0.30
+    random: 0.10
+    hedger: 0.20
+    whale: 0.05
+    lp: 0.05
 
 models:
   - name: CCP_Numba_Accelerated
@@ -69,15 +73,14 @@ models:
 
 **Defaults:**
 *   `backend`: "python" (Reference implementation). Set to "numba" for speed.
-*   `trader_arrival`: Disabled by default. Can be set globally or per-model.
 
 ### Example 1: CCP-Like Model (Cartesi CCP)
 Uses dynamic Expected Shortfall margin, an active circuit breaker, and partial liquidation to mitigate cascades.
 
 ```yaml
-trader_arrival:
-  enabled: true
-  pairs_per_tick: 5
+traders:
+  count: 5000
+  initial_equity: 50000
 
 models:
   - name: CCP_ES99
@@ -203,13 +206,19 @@ stress_factor: 1.0
 seed: 123
 garch_params: garch_params.json
 
+traders:
+  count: 2000
+  initial_equity: 10000
+  behaviors:
+    momentum: 0.5
+    mean_revert: 0.5
+
 models:
   - name: CCP
     backend: numba
     im: { type: es, conf: 0.99 }
     breaker: { soft: 0.4, hard: 0.7, multipliers: [1.0, 1.1, 1.25] }
     liquidation: { type: partial }
-    trader_arrival: { enabled: true, pairs_per_tick: 2 }
 
   - name: HL_20x
     backend: numba

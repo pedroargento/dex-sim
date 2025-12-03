@@ -318,52 +318,36 @@ plot_all(results, "results/20231129_my_experiment/plots")
 
 Below is a guide to the charts produced by the suite and how to interpret them from a risk perspective.
 
-#### 1. Solvency Survival Curve (Log-Log) 💀
+#### 1. System-Level Risk Dashboard 📊
+**What it is:** A high-level composite dashboard providing a comprehensive view of the system's health.
+**Components:**
+*   **Time-Series Panel:** Tracks Open Interest, ECP Exposure (Red Line), Default Fund Loss, Margin Multipliers, and Breaker States (shaded bands).
+*   **Leverage Panel:** Fan chart showing the distribution (5th-95th percentile) of system leverage over time.
+*   **Liquidation Panel:** Heatmap of liquidation intensity, average liquidation size ($k$), and cascade frequency (% of paths liquidating).
+
+#### 2. Solvency Survival Curve (Log-Log) 💀
 **What it is:** A reverse cumulative distribution (survival function) of Default Fund (DF) usage.
 **Interpretation:**
 *   **The Curve:** Shows the probability (Y-axis) that a loss will exceed a certain amount (X-axis).
 *   **The Tail:** A straight line on this log-log plot indicates "heavy tails" (power-law distribution), meaning catastrophic losses are more likely than a standard bell curve predicts.
 
-#### 2. Systemic Solvency Curve (Health Monitor) 🛡️
-**What it is:** Dual-line chart comparing Total Trader Equity (Green) vs Total Maintenance Margin (Red).
-**Interpretation:**
-*   **Green Zone:** Solvency Buffer. The system is healthy.
-*   **Red Zone:** Insolvency/Fragility. Equity < MM means the system is undercollateralized and relying on the insurance fund.
+#### 3. Margin Dashboard 🛡️
+**What it is:** A detailed breakdown of margin mechanics.
+**Components:**
+*   **IM/MM Requirement:** Shows the Initial and Maintenance Margin requirements per $1 of notional over time.
+*   **Volatility Distribution:** Fan chart of the GARCH volatility ($\sigma$) paths.
+*   **Systemic Stress ($R_t$):** Tracks the risk index with Breaker Regime shading (Normal/Soft/Hard).
 
-#### 3. OI Timeline with Breaker Bands 🛑
-**What it is:** Stacked Area Chart of Open Interest overlaid with vertical bands for Breaker States (Green=Normal, Orange=Soft, Red=Hard).
-**Interpretation:**
-*   **Efficacy:** Did the breaker trigger *before* the crash?
-*   **Gating:** Did OI contract (or stop growing) when the background turned Red?
+#### 4. Symmetry Diagnostics ⚖️
+**What it is:** Verifies the market neutrality of the CCP system.
+**Components:**
+*   **ECP Net Position:** Tracks the net exposure absorbed by the CCP (External Counterparty) to maintain symmetry when traders are liquidated.
+*   **Slippage Accumulation:** Cumulative system-wide slippage costs.
 
-#### 4. Trade Intent Gating Waterfall 🚪
-**What it is:** Stacked Bar Chart showing volume Accepted (Normal), Accepted (Risk-Reducing), and Rejected.
-**Interpretation:**
-*   **Gating:** Visualizes the "Reduce-Only" mechanism in action.
-*   **Red Bars:** Volume physically blocked by the risk engine.
-
-#### 5. Leverage Landscape Heatmap ⚖️
-**What it is:** 2D Heatmap (X=Time, Y=Leverage Bucket) showing the distribution of risk.
-**Interpretation:**
-*   **Risk Buildup:** A "hot" red zone in the >20x bucket usually precedes a cascade.
-*   **Heterogeneity:** Shows if risk is concentrated in high-leverage gamblers.
-
-#### 6. Enhanced Liquidation Timeline 💀
-**What it is:** Price chart overlay with markers for liquidation events.
-*   **Yellow Dot:** Partial Liquidation (Soft).
-*   **Red X:** Full Bankruptcy (Hard).
-**Interpretation:** distinguishes between controlled deleveraging and catastrophic failure.
-
-#### 7. Equity-at-Risk Snapshot 💰
-**What it is:** Histogram of System Equity at the end of the simulation.
-**Interpretation:**
-*   **Left Skew:** Indicates high tail risk of insolvency.
-*   **Red Line:** The $0 bankruptcy threshold.
-
-#### 8. Risk Diamond (Trader Heterogeneity) 💎
+#### 5. Risk Diamond (Microstructure) 💎
 **What it is:** Scatterplot of Position Size vs Leverage, sized by Margin Usage.
 **Interpretation:**
-*   **Top-Right:** Dangerous "Systemic Whales".
+*   **Top-Right:** Dangerous "Systemic Whales" (Large Position + High Leverage).
 *   **Top-Left:** High-leverage "Gamblers".
 *   **Bottom-Left:** Safe retail flow.
 

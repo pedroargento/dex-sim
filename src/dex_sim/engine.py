@@ -1,6 +1,6 @@
-# ============================================================
-#  engine.py — High-level orchestrator for dex-sim
-# ============================================================
+# ============================================================ 
+#  engine.py — High-level orchestrator for dex-sim 
+# ============================================================ 
 
 import numpy as np
 
@@ -59,9 +59,9 @@ def _build_rt_and_mult(
     return rt, breaker_state, margin_mult
 
 
-# ============================================================
-#  MAIN ENTRY: run_models()
-# ============================================================
+# ============================================================ 
+#  MAIN ENTRY: run_models() 
+# ============================================================ 
 
 
 def run_models(
@@ -70,14 +70,13 @@ def run_models(
     trader_pool_config: dict = None,  # New: pass config to extract rates
     num_paths: int = 5000,
     initial_price: float = 4000.0,
-    notional: float = 400_000_000.0,
     stress_factor: float = 1.0,
     garch_params_file: str = "garch_params.json",
 ) -> MultiModelResults:
 
-    # ------------------------------------------------------------
+    # ------------------------------------------------------------ 
     # Step 1 — Generate MC paths (returns, vol, amihud)
-    # ------------------------------------------------------------
+    # ------------------------------------------------------------ 
     mc = MCReturnsGenerator(
         garch_params_file=garch_params_file,
         num_paths=num_paths,
@@ -111,16 +110,16 @@ def run_models(
     expand_rate = float(behaviors_cfg.get("expand_rate", 0.01))
     reduce_rate = float(behaviors_cfg.get("reduce_rate", 0.005))
 
-    # ------------------------------------------------------------
+    # ------------------------------------------------------------ 
     # Step 2 — Loop through models
-    # ------------------------------------------------------------
+    # ------------------------------------------------------------ 
     for model in models:
 
         print(f"\n=== Running model: {model.name} ===")
 
-        # --------------------------------------------------------
+        # -------------------------------------------------------- 
         # 2a — Precompute Rt, breaker state, and multipliers
-        # --------------------------------------------------------
+        # -------------------------------------------------------- 
         rt_grid, breaker_state, margin_mult = _build_rt_and_mult(
             log_returns=log_returns,
             amihud_le=amihud_le,
@@ -130,9 +129,9 @@ def run_models(
             breaker_multipliers=model.breaker.multipliers,
         )
 
-        # --------------------------------------------------------
+        # -------------------------------------------------------- 
         # 2b — Prepare parameters for the optimized columnar kernel
-        # --------------------------------------------------------
+        # -------------------------------------------------------- 
 
         # IM config
         # im_factor & im_is_es allow engine to compute IM without calling Python IM objects
@@ -154,9 +153,9 @@ def run_models(
         slippage_factor = model.liquidation.slippage_factor
         do_partial = model.liquidation.__class__.__name__ == "PartialCloseOut"
 
-        # --------------------------------------------------------
+        # -------------------------------------------------------- 
         # 2c — Run the optimized Numba kernel
-        # --------------------------------------------------------
+        # -------------------------------------------------------- 
         (
             df_required,
             defaults_i,
@@ -177,6 +176,8 @@ def run_models(
             snap_eq_i,
             snap_im_i,
             snap_mm_i,
+            ecp_position_path,
+            ecp_slippage_cost,
         ) = _run_simulation_loop_numba_columnar(
             log_returns,
             pct_returns,
@@ -184,7 +185,6 @@ def run_models(
             sigmas,
             initial_price,
             sigma_daily,
-            notional,
             margin_mult,
             breaker_state,
             # IM config
@@ -204,9 +204,9 @@ def run_models(
             reduce_rate,
         )
 
-        # --------------------------------------------------------
+        # -------------------------------------------------------- 
         # 2d — Pack into SingleModelResults
-        # --------------------------------------------------------
+        # -------------------------------------------------------- 
         model_results[model.name] = SingleModelResults(
             name=model.name,
             df_required=df_required,
@@ -223,17 +223,19 @@ def run_models(
             equity_short=equity_short_path,
             df_path=df_path,
             slippage_cost=slippage_cost,
+            ecp_position_path=ecp_position_path,
+            ecp_slippage_cost=ecp_slippage_cost,
         )
 
-    # ------------------------------------------------------------
+    # ------------------------------------------------------------ 
     # Step 3 — Return MultiModelResults
-    # ------------------------------------------------------------
+    # ------------------------------------------------------------ 
     return MultiModelResults(
         models=model_results,
         num_paths=num_paths,
         horizon=horizon,
         initial_price=initial_price,
-        notional=notional,
+        notional=0.0, # No global notional anymore
         log_returns=log_returns,
         amihud_le=amihud_le,
         sigma_path=sigmas,

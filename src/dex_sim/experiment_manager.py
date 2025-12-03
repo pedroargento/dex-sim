@@ -78,53 +78,64 @@ def build_liquidation(cfg):
     else:
 
         raise ValueError(f"Unknown liquidation type: {t}")
-def build_trader_pool(cfg: dict, notional_target: float):
+def build_trader_pool(cfg: dict):
     """
     Construct fixed trader pool arrays.
+    Symmetric population: N must be even.
+    0..N/2-1: Primary
+    N/2..N-1: Mirror
     """
     traders_cfg = cfg.get("traders", {})
     
     # Backward compatibility / Default
-    N = traders_cfg.get("count", cfg.get("num_traders", 2000))
+    N = int(traders_cfg.get("count", cfg.get("num_traders", 2000)))
     
+    if N % 2 != 0:
+        print(f"[WARN] Trader count {N} is odd. Increasing to {N+1} for symmetry.")
+        N += 1
+
     # Warn if old 'trader_arrival' is present
     if "trader_arrival" in cfg:
         print("[WARN] 'trader_arrival' config is deprecated and ignored. Using fixed trader pool.")
 
+    if "max_leverage" in traders_cfg:
+         print("[WARN] 'max_leverage' in trader config is deprecated and ignored. Leverage is governed by IM/MM.")
+
     # Initialize arrays
+    # pool_arrival_tick is irrelevant now, all start at 0
     pool_arrival_tick = np.zeros(N, dtype=np.int64)
     
-    # Directions: 50/50 split by default
-    # Indices 0, 2, 4... are Long (1.0)
-    # Indices 1, 3, 5... are Short (-1.0)
-    pool_direction = np.where(np.arange(N) % 2 == 0, 1.0, -1.0)
+    # Initial Notional is 0. All traders start flat.
+    # We keep the array for kernel compatibility but zero it out.
+    pool_notional = np.zeros(N, dtype=np.float64)
     
-    # Notional
-    # We want total Long Notional ~ notional_target
-    # We want total Short Notional ~ notional_target
-    # Number of longs = N/2 (approx)
-    # per_trader = notional_target / (N/2)
-    per_trader_notional = notional_target / (N / 2.0)
-    pool_notional = np.full(N, per_trader_notional, dtype=np.float64)
+    # Direction is implicit in symmetry logic (Primary vs Mirror), 
+    # but we can keep an array if needed. For now, zeros.
+    pool_direction = np.zeros(N, dtype=np.float64)
     
     # Equity
     init_equity = float(traders_cfg.get("initial_equity", 10000.0))
     pool_equity = np.full(N, init_equity, dtype=np.float64)
     
     # Behaviors
-    # Default: 50% Expanders (0), 50% Reducers (1)
     # Config: behaviors: { expand_fraction: 0.5 }
     behaviors_cfg = traders_cfg.get("behaviors", {})
     expand_frac = float(behaviors_cfg.get("expand_fraction", 0.5))
     
-    if "max_leverage" in traders_cfg:
-         print("[WARN] 'max_leverage' in trader config is deprecated and ignored. Leverage is governed by IM/MM.")
-
-    pool_behavior_id = np.zeros(N, dtype=np.int64) # Default 0 (Expander)
+    pool_behavior_id = np.zeros(N, dtype=np.int64) 
     
-    # Set Reducers (1)
-    num_expanders = int(N * expand_frac)
-    pool_behavior_id[num_expanders:] = 1
+    # Assign behaviors to Primary traders (0 to N/2 - 1)
+    half_N = N // 2
+    num_expanders_half = int(half_N * expand_frac)
+    
+    # 0 = Expander, 1 = Reducer
+    # First num_expanders_half get 0, rest get 1
+    # Mirror traders (N/2 to N-1) copy their primary counterpart
+    
+    for i in range(half_N):
+        bid = 0 if i < num_expanders_half else 1
+        pool_behavior_id[i] = bid
+        pool_behavior_id[i + half_N] = bid
     
     return (
         pool_arrival_tick,
@@ -177,26 +188,11 @@ def run_experiment_from_config(config_file: str, root: str = "results") -> str:
     seed = cfg.get("seed", 42)
     garch_params = cfg.get("garch_params", "garch_params.json")
 
-    # Notional: NEW API
-    notional = cfg.get("notional")
-    if notional is None:
-        # Backward compatibility: allow total_oi * oi_fraction, but warn
-        total_oi = cfg.get("total_oi")
-        oi_fraction = cfg.get("oi_fraction")
-        if total_oi is not None and oi_fraction is not None:
-            print(
-                "[WARN] `total_oi` + `oi_fraction` are deprecated. "
-                "Please specify `notional` directly in the config."
-            )
-            notional = float(total_oi) * float(oi_fraction)
-        else:
-            raise ValueError(
-                "Config must include `notional` (position size). "
-                "Old `total_oi`+`oi_fraction` interface is deprecated."
-            )
+    if "notional" in cfg:
+        print("[WARN] 'notional' in global config is deprecated. OI emerges endogenously.")
 
     # Build Trader Pool
-    pool_data = build_trader_pool(cfg, notional)
+    pool_data = build_trader_pool(cfg)
 
     np.random.seed(seed)
 
@@ -205,9 +201,8 @@ def run_experiment_from_config(config_file: str, root: str = "results") -> str:
     print(f"Run ID: {rid}")
     print(f"Models: {[m.name for m in models]}")
     print(f"Paths: {num_paths}")
-    print(f"Notional per side: {notional:,.0f}")
     print(f"Stress factor: {stress_factor}")
-    print(f"Traders: {len(pool_data[0])} (Fixed Pool)")
+    print(f"Traders: {len(pool_data[0])} (Symmetric Pool)")
     print()
 
     # Run simulation
@@ -217,7 +212,6 @@ def run_experiment_from_config(config_file: str, root: str = "results") -> str:
         trader_pool_config=cfg.get("traders", {}),
         num_paths=num_paths,
         initial_price=initial_price,
-        notional=notional,
         stress_factor=stress_factor,
         garch_params_file=garch_params,
     )

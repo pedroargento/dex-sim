@@ -1003,6 +1003,35 @@ def plot_all_for_model(model_res: SingleModelResults, outdir: str, max_paths: in
     plot_equity_at_risk_snapshot(model_res, d)
     plot_risk_diamond(model_res, d)
     plot_survival_curve(model_res, d)
+    plot_ecp_exposure(model_res, d)
+
+
+def plot_ecp_exposure(model_res: SingleModelResults, outdir: str):
+    """
+    Line chart of External Counterparty (ECP) Exposure over time.
+    Shows the absolute exposure the CCP absorbs due to liquidations.
+    """
+    if model_res.ecp_position_path is None:
+        return
+    
+    idx = _get_worst_path_idx(model_res)
+    T = model_res.ecp_position_path.shape[1]
+    t = np.arange(T)
+    
+    ecp_pos = model_res.ecp_position_path[idx]
+    
+    plt.figure(figsize=(10, 6))
+    plt.plot(t, ecp_pos, color='purple', lw=1.5, label='ECP Position')
+    plt.axhline(0, color='black', lw=1, ls='--')
+    
+    plt.title(f"External Counterparty (ECP) Exposure (Path #{idx}) — {model_res.name}")
+    plt.xlabel("Time Step")
+    plt.ylabel("Position (Units)")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(os.path.join(outdir, f"{model_res.name}_ecp_exposure.png"), dpi=150)
+    plt.close()
 
 
 def plot_all(results: MultiModelResults, outdir: str):

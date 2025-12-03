@@ -10,7 +10,7 @@ def _run_simulation_loop_numba_columnar(
     sigmas: np.ndarray,
     initial_price: float,
     sigma_daily: float,
-    initial_notional_target: float,
+    # initial_notional_target removed
     margin_mult_grid: np.ndarray,  # (P, T)
     breaker_state_grid: np.ndarray,  # (P, T)
     # IM config
@@ -59,6 +59,11 @@ def _run_simulation_loop_numba_columnar(
     equity_short_path = np.zeros((P, T), dtype=np.float64)
     df_path = np.zeros((P, T), dtype=np.float64)
     slippage_cost = np.zeros((P, T), dtype=np.float64)
+    
+    # ECP Arrays
+    ecp_position = np.zeros(P, dtype=np.float64)
+    ecp_position_path = np.zeros((P, T), dtype=np.float64)
+    ecp_slippage_cost = np.zeros(P, dtype=np.float64) # Tracks slippage absorbed by system if any (though mostly trader pays)
 
     intent_accepted_normal = np.zeros((P, T), dtype=np.float64)
     intent_accepted_reduce = np.zeros((P, T), dtype=np.float64)
@@ -83,8 +88,6 @@ def _run_simulation_loop_numba_columnar(
     is_active = np.ones((P, N), dtype=np.int8)
     
     # Scratch space for desired deltas (reused per step)
-    # But since we parallelize over P implicitly via loop, we allocate (P, N)
-    # Optimization: could be done inside loop but allocating outside is safer for numba
     desired_delta_q = np.zeros((P, N), dtype=np.float64)
 
     prices = np.full(P, initial_price, dtype=np.float64)
@@ -96,12 +99,11 @@ def _run_simulation_loop_numba_columnar(
     for p in range(P):
         for i in range(N):
             equities[p, i] = pool_equity[i]
+            # positions start at 0 as pool_notional is now 0
             positions[p, i] = pool_direction[i] * pool_notional[i] / initial_price
 
             # IM base rate (approx)
             if im_is_es:
-                # Use the true ES factor calculated in Python
-                # IM = sigma_t * es_factor * notional
                 base_rate = sigmas[p, 0] * im_factor
             else:
                 base_rate = im_factor
@@ -112,6 +114,8 @@ def _run_simulation_loop_numba_columnar(
 
     # Record t = 0
     price_paths[:, 0] = initial_price
+    ecp_position_path[:, 0] = ecp_position
+    
     # Initial aggregation
     for p in range(P):
         pos_L = 0.0; pos_S = 0.0; eq_L = 0.0; eq_S = 0.0
@@ -143,138 +147,148 @@ def _run_simulation_loop_numba_columnar(
             price_paths[p, t] = prices[p]
             
             dP = prices[p] - prev_prices[p]
+            # Optimization: PnL update can be skipped if positions are 0
+            # But standard loop handles it
             for i in range(N):
                 if is_active[p, i] == 0:
                     continue
                 equities[p, i] += positions[p, i] * dP
 
-        # 2. Behavior Logic (Expand/Reduce)
-        # We process path by path to allow complex logic
+        # 2. Behavior Logic (Expand/Reduce) with Symmetric Mirroring
+        # Primary Traders: 0 to N/2 - 1
+        # Mirror Traders: N/2 to N - 1
+        half_N = N // 2
+        
         for p in range(P):
             price_p = prices[p]
-            breaker = breaker_state_grid[p, t] # 0=Normal, 1=Soft, 2=Hard
+            ret_p = pct_returns[p, t] # previous return? log_returns is current step return.
+            # "sign(previous_return)" - wait, behavior depends on return?
+            # Prompt says: "Expanders ... delta_usd = expand_rate * equity * sign(previous_return)"
+            # Wait, expanders follow trend? "push position away from zero". 
+            # If flat, they need a direction.
+            # "If flat, split evenly on initialization: half long, half short"
+            # In new logic, they are flat at start.
+            # So Expander A (i=0) might go Long, Mirror A (i=N/2) goes Short.
+            # If Expander logic is trend-following:
+            # If ret > 0 -> Buy. If ret < 0 -> Sell.
+            # But let's stick to the prompt: "push position away from zero".
+            # If pos > 0 -> Buy. If pos < 0 -> Sell.
+            # If pos == 0 -> use `sign(previous_return)` or random?
+            # Prompt: "delta_usd = expand_rate * equity * sign(previous_return)"
+            # This implies trend following for entry.
+            
+            breaker = breaker_state_grid[p, t]
             m_mult = margin_mult_grid[p, t]
             
             if im_is_es:
-                # Use the true ES factor calculated in Python
                 im_rate = sigmas[p, t] * im_factor
             else:
                 im_rate = im_factor
             im_rate *= m_mult
 
-            # A. Calculate Desired Deltas
-            expand_long_notional = 0.0
-            expand_short_notional = 0.0
-            
-            for i in range(N):
-                if is_active[p, i] == 0:
-                    desired_delta_q[p, i] = 0.0
+            # We only iterate primary traders
+            for i in range(half_N):
+                mirror_idx = i + half_N
+                
+                # If either primary or mirror is dead, stop pair?
+                # "Liquidation ... close only trader i ... do NOT adjust trader j"
+                # But for NEW trades, if one is dead, symmetry breaks if we trade for the other.
+                # "For any trade delta_q ... positions[i] += delta_q; positions[mirror] -= delta_q"
+                # Implies if we can't apply to both, we shouldn't apply to either?
+                # Or we accept asymmetry if one is dead?
+                # "Net position = 0 at all times". This implies we MUST trade both or neither.
+                if is_active[p, i] == 0 or is_active[p, mirror_idx] == 0:
                     continue
                 
-                eq = equities[p, i]
-                pos = positions[p, i]
-                bid = pool_behavior_id[i]
+                eq_i = equities[p, i]
+                pos_i = positions[p, i]
+                bid = pool_behavior_id[i] # Mirror has same ID
                 
-                d_q = 0.0
+                delta_usd = 0.0
                 
-                # Behavior 0: EXPANDERS
-                if bid == 0:
-                    # Only expand if NOT Hard breaker
-                    if breaker < 2:
-                        desired_notional = expand_rate * eq
-                        # Direction: same as current pos. If flat (shouldn't happen often), use pool_direction
-                        if pos > 1e-9:
-                            d_q = desired_notional / price_p
-                        elif pos < -1e-9:
-                            d_q = -desired_notional / price_p
+                # Behavior Logic
+                if bid == 0: # EXPANDER
+                    if breaker < 2: # Not HARD
+                        # Direction
+                        direction = 0.0
+                        if pos_i > 1e-9:
+                            direction = 1.0
+                        elif pos_i < -1e-9:
+                            direction = -1.0
                         else:
-                            # Fallback to pool direction if flat
-                            d_q = (desired_notional / price_p) * pool_direction[i]
+                            # Flat: follow return sign
+                            # If return is 0 (rare), use pool_direction/index parity?
+                            if ret_p > 0:
+                                direction = 1.0
+                            elif ret_p < 0:
+                                direction = -1.0
+                            else:
+                                # Fallback to alternating based on index
+                                direction = 1.0 if (i % 2 == 0) else -1.0
                         
-                        if d_q > 0:
-                            expand_long_notional += d_q * price_p
+                        delta_usd = expand_rate * eq_i * direction
+                
+                elif bid == 1: # REDUCER
+                    # Reduce towards zero
+                    if abs(pos_i) > 1e-9:
+                        reduce_usd = reduce_rate * eq_i
+                        # Cap at full close
+                        current_notional = abs(pos_i * price_p)
+                        if reduce_usd > current_notional:
+                            reduce_usd = current_notional
+                        
+                        if pos_i > 0:
+                            delta_usd = -reduce_usd
                         else:
-                            expand_short_notional += abs(d_q * price_p)
-
-                # Behavior 1: REDUCERS
-                elif bid == 1:
-                    # Always allowed
-                    desired_notional = reduce_rate * eq
-                    # Direction: Opposite to current pos (reduce towards 0)
-                    if pos > 1e-9:
-                        d_q = -desired_notional / price_p
-                        # Don't flip sign
-                        if (pos + d_q) < 0:
-                            d_q = -pos
-                    elif pos < -1e-9:
-                        d_q = desired_notional / price_p # Positive d_q to reduce neg pos
-                        if (pos + d_q) > 0:
-                            d_q = -pos
-                    else:
-                        d_q = 0.0
-
-                desired_delta_q[p, i] = d_q
-
-            # B. Symmetry Check (for Expanders)
-            # Reducers reduce existing pos, so if system is balanced, reduction keeps it approx balanced.
-            # We balance expansion to ensure no drift.
-            imbalance = expand_long_notional - expand_short_notional
-            scale_long = 1.0
-            scale_short = 1.0
-            
-            if imbalance > 1e-9 and expand_long_notional > 1e-9:
-                # Longs expanding too much, scale them down
-                # Target = expand_short_notional
-                scale_long = expand_short_notional / expand_long_notional
-            elif imbalance < -1e-9 and expand_short_notional > 1e-9:
-                # Shorts expanding too much
-                scale_short = expand_long_notional / expand_short_notional
-
-            # C. Execution Gate
-            for i in range(N):
-                d_q = desired_delta_q[p, i]
-                if abs(d_q) < 1e-12:
+                            delta_usd = reduce_usd
+                
+                if abs(delta_usd) < 1e-9:
                     continue
-                
-                bid = pool_behavior_id[i]
-                
-                # Apply symmetry scaling to expanders
-                if bid == 0:
-                    if d_q > 0:
-                        d_q *= scale_long
-                    else:
-                        d_q *= scale_short
-                
-                if abs(d_q) < 1e-12:
-                    continue
-
-                curr_pos = positions[p, i]
-                new_pos = curr_pos + d_q
-                new_notional = abs(new_pos * price_p)
-                new_im = new_notional * im_rate
-                # Check Leverage Cap
-                curr_eq = equities[p, i]
-                if curr_eq <= 0:
-                     continue
-                
-                # Margin Check: Equity >= IM_new? 
-                # Only constraint is having enough equity to cover IM.
-                if curr_eq >= new_im:
-                    # Execute
-                    positions[p, i] = new_pos
-                    im_locked[p, i] = new_im
-                    mm_required[p, i] = new_im * GAMMA
                     
-                    usd_val = abs(d_q * price_p)
-                    if bid == 1:
-                         intent_accepted_reduce[p, t] += usd_val
-                    else:
-                         intent_accepted_normal[p, t] += usd_val
+                delta_q = delta_usd / price_p
+                
+                # Gate: Breaker HARD (handled inside Expander check)
+                
+                # Gate: Margin Check
+                # Check primary
+                new_pos_i = pos_i + delta_q
+                new_notional_i = abs(new_pos_i * price_p)
+                new_im_i = new_notional_i * im_rate
+                
+                if eq_i < new_im_i:
+                    intent_rejected[p, t] += abs(delta_usd)
+                    continue
+                    
+                # Check mirror (symmetric opposite)
+                pos_mirror = positions[p, mirror_idx]
+                eq_mirror = equities[p, mirror_idx]
+                
+                # Mirror does opposite delta_q
+                new_pos_mirror = pos_mirror - delta_q
+                new_notional_mirror = abs(new_pos_mirror * price_p)
+                new_im_mirror = new_notional_mirror * im_rate
+                
+                if eq_mirror < new_im_mirror:
+                    intent_rejected[p, t] += abs(delta_usd)
+                    continue
+                
+                # Accepted
+                positions[p, i] = new_pos_i
+                im_locked[p, i] = new_im_i
+                mm_required[p, i] = new_im_i * GAMMA
+                
+                positions[p, mirror_idx] = new_pos_mirror
+                im_locked[p, mirror_idx] = new_im_mirror
+                mm_required[p, mirror_idx] = new_im_mirror * GAMMA
+                
+                val = abs(delta_usd)
+                if bid == 0:
+                    intent_accepted_normal[p, t] += val
                 else:
-                    intent_rejected[p, t] += abs(d_q * price_p)
+                    intent_accepted_reduce[p, t] += val
 
 
-        # 3. Liquidations
+        # 3. Liquidations (Iterate ALL traders)
         for p in range(P):
             price_p = prices[p]
             step_liqs[p] = 0.0
@@ -291,8 +305,7 @@ def _run_simulation_loop_numba_columnar(
 
                 eq_i = equities[p, i]
                 
-                # Refresh MM based on current pos/price
-                # (Position might have changed in step 2)
+                # Refresh MM
                 pos_i = positions[p, i]
                 notional_i = abs(pos_i * price_p)
                 im_i = notional_i * im_rate
@@ -318,7 +331,11 @@ def _run_simulation_loop_numba_columnar(
 
                     equities[p, i] = eq_i - cost
                     positions[p, i] = pos_i - qty_close
-                    # Update im/mm for next step/metrics
+                    
+                    # ECP Absorbs the closed position
+                    ecp_position[p] -= qty_close
+                    
+                    # Recalc margins after close
                     im_locked[p, i] = im_i * (1.0 - k)
                     mm_required[p, i] = mm_i * (1.0 - k)
 
@@ -333,8 +350,16 @@ def _run_simulation_loop_numba_columnar(
                         df_path[p, t] += loss
                         defaults[p] = 1
 
+                        # Full remaining close out absorbed by ECP
+                        # Note: positions was already reduced by qty_close in partial step
+                        remaining_pos = positions[p, i]
+                        
                         equities[p, i] = 0.0
                         positions[p, i] = 0.0
+                        
+                        if abs(remaining_pos) > 1e-9:
+                             ecp_position[p] -= remaining_pos
+                        
                         im_locked[p, i] = 0.0
                         mm_required[p, i] = 0.0
                         is_active[p, i] = 0
@@ -362,6 +387,9 @@ def _run_simulation_loop_numba_columnar(
                 lev_long_path[p, t] = (pos_L * prices[p]) / eq_L
             if pos_S > 1e-9 and eq_S > 0.0:
                 lev_short_path[p, t] = (pos_S * prices[p]) / eq_S
+            
+            # Log ECP Position at end of step
+            ecp_position_path[p, t] = ecp_position[p]
 
     return (
         df_required,
@@ -383,4 +411,6 @@ def _run_simulation_loop_numba_columnar(
         trader_lifetime_eq,
         trader_lifetime_im,
         trader_lifetime_mm,
+        ecp_position_path,
+        ecp_slippage_cost,
     )

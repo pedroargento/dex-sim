@@ -69,6 +69,9 @@ def save_results(results: MultiModelResults, outdir: str):
         _save_array(g, "equity_long", model.equity_long)
         _save_array(g, "equity_short", model.equity_short)
 
+        _save_array(g, "ecp_position_path", model.ecp_position_path)
+        _save_array(g, "ecp_slippage_cost", model.ecp_slippage_cost)
+
         # Save metadata
         if model.metadata:
             with open(os.path.join(outdir, f"metadata_{name}.json"), "w") as f:
@@ -112,6 +115,8 @@ def load_results(outdir: str) -> MultiModelResults:
             notional_paths=_load_array(g, "notional_paths"),
             equity_long=_load_array(g, "equity_long"),
             equity_short=_load_array(g, "equity_short"),
+            ecp_position_path=_load_array(g, "ecp_position_path"),
+            ecp_slippage_cost=_load_array(g, "ecp_slippage_cost"),
             metadata=(
                 json.load(open(os.path.join(outdir, f"metadata_{name}.json")))
                 if os.path.exists(os.path.join(outdir, f"metadata_{name}.json"))

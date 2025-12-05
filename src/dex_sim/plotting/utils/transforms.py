@@ -1,4 +1,5 @@
 import numpy as np
+import warnings
 from typing import Tuple, Optional
 
 def compute_percentiles(
@@ -13,10 +14,17 @@ def compute_percentiles(
     if data is None or data.size == 0:
         return {}
     
-    # Handle NaNs if present (e.g. leverage can be NaN)
+    # Check if fully NaN
+    if np.all(np.isnan(data)):
+        return {}
+
     res = {}
-    for p in percentiles:
-        res[p] = np.nanpercentile(data, p, axis=axis)
+    # Suppress All-NaN slice warning (common for leverage at t=0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        for p in percentiles:
+            res[p] = np.nanpercentile(data, p, axis=axis)
+            
     return res
 
 def reconstruct_im_mm_bands(

@@ -12,30 +12,41 @@ def make_margin_compare_panels(
     model_names = list(models.keys())
     fig = make_stacked_subplots(len(model_names), model_names)
 
-    if sigma_path is None:
+    if sigma_path is None or sigma_path.size == 0:
         # Create a dummy sigma path if missing, just to allow rendering
-        # Warning: This yields invalid absolute numbers, but shows relative multiplier effects
         sigma_path = np.ones(1) 
 
     for idx, (name, res) in enumerate(models.items()):
         row = idx + 1
         
-        if res.notional_paths is None or res.margin_multiplier is None:
+        # Guards
+        has_notional = res.notional_paths is not None and res.notional_paths.size > 0
+        has_mult = res.margin_multiplier is not None and res.margin_multiplier.size > 0 and not np.all(np.isnan(res.margin_multiplier))
+        
+        if not has_notional or not has_mult:
+            fig.add_annotation(
+                text=f"{name}: No margin data",
+                row=row, col=1,
+                showarrow=False,
+                font=dict(color="red")
+            )
             continue
             
-        # Try to guess if it's ES or Fixed from name? 
-        # Or just assume ES for visualization if multiplier varies.
-        # We can check if margin_multiplier is all 1s.
-        is_es = not np.allclose(res.margin_multiplier, 1.0)
-        
         bands = reconstruct_im_mm_bands(
             res.notional_paths, 
             sigma_path, 
             res.margin_multiplier, 
-            im_is_es=True # Assume true to visualize the dynamic nature
+            im_is_es=True 
         )
         
-        if not bands: continue
+        if not bands: 
+            fig.add_annotation(
+                text=f"{name}: Failed to reconstruct bands",
+                row=row, col=1,
+                showarrow=False,
+                font=dict(color="red")
+            )
+            continue
         
         # IM P50-P90
         im = bands["im"]
@@ -62,6 +73,5 @@ def make_margin_compare_panels(
 
 def make_margin_panel(model: SingleModelResults, sigma_path: np.ndarray = None) -> go.Figure:
     fig = go.Figure()
-    # Detail view similar to above but cleaner
     apply_standard_layout(fig, f"Margin Detail: {model.name}")
     return fig

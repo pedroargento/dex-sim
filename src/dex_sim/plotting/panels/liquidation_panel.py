@@ -5,12 +5,6 @@ from ...data_structures import SingleModelResults
 from ..layout import apply_standard_layout
 
 def make_liquidation_compare_panels(models: dict[str, SingleModelResults]) -> go.Figure:
-    # For liquidations, we might want dual axis?
-    # But "Small multiples ... One subplot per model".
-    # Plotly subplots with secondary_y per row is complex in loop.
-    # Let's use bar for cost and line for fraction on same plot with different axis magnitude?
-    # No, fraction is 0-1 (or small). Cost is $. 
-    # We really need secondary y.
     
     rows = len(models)
     titles = list(models.keys())
@@ -21,11 +15,26 @@ def make_liquidation_compare_panels(models: dict[str, SingleModelResults]) -> go
     for idx, (name, res) in enumerate(models.items()):
         row = idx + 1
         
-        if res.liquidation_fraction is None: continue
+        has_liq = res.liquidation_fraction is not None and res.liquidation_fraction.size > 0 and not np.all(np.isnan(res.liquidation_fraction))
+        
+        if not has_liq:
+            fig.add_annotation(
+                text=f"{name}: No liquidation data",
+                row=row, col=1,
+                showarrow=False,
+                font=dict(color="red"),
+                secondary_y=False
+            )
+            continue
         
         # Mean across paths
         liq_frac = np.nanmean(res.liquidation_fraction, axis=0)
-        slip_cost = np.nanmean(res.slippage_cost, axis=0)
+        
+        has_cost = res.slippage_cost is not None and res.slippage_cost.size > 0 and not np.all(np.isnan(res.slippage_cost))
+        if has_cost:
+            slip_cost = np.nanmean(res.slippage_cost, axis=0)
+        else:
+            slip_cost = np.zeros_like(liq_frac)
         
         x = np.arange(len(liq_frac))
         

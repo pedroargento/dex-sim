@@ -221,8 +221,13 @@ def run_experiment_from_config(config_file: str, root: str = "results") -> str:
     save_results(results, outdir)
 
     # Generate Summary Report
-    report_path = generate_summary(results, outdir)
-    print(f"Summary report → {report_path}")
+    summary_path = generate_summary(results, outdir)
+    print(f"Summary report → {summary_path}")
+
+    # Generate Plotly Dashboard
+    from dex_sim.plotting.dashboard_export import generate_dashboard
+    dashboard_path = generate_dashboard(results, outdir)
+    print(f"Interactive dashboard → {dashboard_path}")
 
     with open(os.path.join(outdir, "config_used.yaml"), "w") as f:
         yaml.safe_dump(cfg, f)

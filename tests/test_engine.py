@@ -35,7 +35,7 @@ def test_build_rt_and_mult():
 def run_sim_helper(
     P, T, initial_price, notional_target, sigma_daily,
     log_returns, pct_returns,
-    im_factor, im_is_es, slippage=0.001, do_partial=False
+    im_factor, im_is_es, slippage=0.001, do_partial=False, gamma=0.8
 ):
     # Dummy inputs for other params
     amihud_le = np.zeros((P, T))
@@ -65,7 +65,7 @@ def run_sim_helper(
     return _run_simulation_loop_numba_columnar(
         log_returns, pct_returns, amihud_le, sigmas, initial_price, sigma_daily,
         margin_mult_grid, breaker_state_grid,
-        im_factor, im_is_es, slippage, do_partial,
+        im_factor, im_is_es, slippage, do_partial, gamma,
         pool_arrival_tick, pool_notional, pool_direction, pool_equity,
         pool_behavior_id, expand_rate, reduce_rate
     )

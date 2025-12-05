@@ -193,6 +193,7 @@ def run_models(
             # Liq config
             slippage_factor,
             do_partial,
+            0.8, # gamma
             # Trader pool
             pool_arrival_tick,
             pool_notional,

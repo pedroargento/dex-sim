@@ -19,6 +19,7 @@ def _run_simulation_loop_numba_columnar(
     # Liquidation config
     slippage_factor: float,
     do_partial_liquidation: bool,
+    gamma: float,
     # Trader pool template (1D, length N)
     pool_arrival_tick: np.ndarray,
     pool_notional: np.ndarray,
@@ -79,7 +80,7 @@ def _run_simulation_loop_numba_columnar(
     # --------------------------------------------------------
     # Internal state (P, N)
     # --------------------------------------------------------
-    GAMMA = 0.8
+    
 
     positions = np.zeros((P, N), dtype=np.float64)
     equities = np.zeros((P, N), dtype=np.float64)
@@ -110,7 +111,7 @@ def _run_simulation_loop_numba_columnar(
 
             im_req = pool_notional[i] * base_rate * margin_mult_grid[p, 0]
             im_locked[p, i] = im_req
-            mm_required[p, i] = im_req * GAMMA
+            mm_required[p, i] = im_req * gamma
 
     # Record t = 0
     price_paths[:, 0] = initial_price
@@ -275,11 +276,11 @@ def _run_simulation_loop_numba_columnar(
                 # Accepted
                 positions[p, i] = new_pos_i
                 im_locked[p, i] = new_im_i
-                mm_required[p, i] = new_im_i * GAMMA
+                mm_required[p, i] = new_im_i * gamma
                 
                 positions[p, mirror_idx] = new_pos_mirror
                 im_locked[p, mirror_idx] = new_im_mirror
-                mm_required[p, mirror_idx] = new_im_mirror * GAMMA
+                mm_required[p, mirror_idx] = new_im_mirror * gamma
                 
                 val = abs(delta_usd)
                 if bid == 0:
@@ -336,7 +337,7 @@ def _run_simulation_loop_numba_columnar(
 
                 # B. Margin Check
                 im_i = notional_i * im_rate
-                mm_i = im_i * GAMMA
+                mm_i = im_i * gamma
                 
                 im_locked[p, i] = im_i
                 mm_required[p, i] = mm_i

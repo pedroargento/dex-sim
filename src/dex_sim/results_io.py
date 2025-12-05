@@ -72,6 +72,13 @@ def save_results(results: MultiModelResults, outdir: str):
         _save_array(g, "ecp_position_path", model.ecp_position_path)
         _save_array(g, "ecp_slippage_cost", model.ecp_slippage_cost)
 
+        _save_array(g, "liquidation_fraction", model.liquidation_fraction)
+        _save_array(g, "slippage_cost", model.slippage_cost)
+        _save_array(g, "df_path", model.df_path)
+        _save_array(g, "intent_accepted_normal", model.intent_accepted_normal)
+        _save_array(g, "intent_accepted_reduce", model.intent_accepted_reduce)
+        _save_array(g, "intent_rejected", model.intent_rejected)
+
         # Save metadata
         if model.metadata:
             with open(os.path.join(outdir, f"metadata_{name}.json"), "w") as f:
@@ -117,6 +124,12 @@ def load_results(outdir: str) -> MultiModelResults:
             equity_short=_load_array(g, "equity_short"),
             ecp_position_path=_load_array(g, "ecp_position_path"),
             ecp_slippage_cost=_load_array(g, "ecp_slippage_cost"),
+            liquidation_fraction=_load_array(g, "liquidation_fraction"),
+            slippage_cost=_load_array(g, "slippage_cost"),
+            df_path=_load_array(g, "df_path"),
+            intent_accepted_normal=_load_array(g, "intent_accepted_normal"),
+            intent_accepted_reduce=_load_array(g, "intent_accepted_reduce"),
+            intent_rejected=_load_array(g, "intent_rejected"),
             metadata=(
                 json.load(open(os.path.join(outdir, f"metadata_{name}.json")))
                 if os.path.exists(os.path.join(outdir, f"metadata_{name}.json"))

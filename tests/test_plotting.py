@@ -1,19 +1,7 @@
 import os
 import pytest
 import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-from dex_sim.plotting import (
-    plot_df_survival_curve,
-    plot_comparison_dashboard,
-    plot_efficiency_frontier,
-    plot_system_dashboard,
-    plot_microstructure_explorer,
-    plot_symmetry_diagnostics,
-    plot_liquidation_heatmap,
-    plot_worst_case_autopsy,
-    plot_all
-)
+from dex_sim.plotting import plot_all, generate_dashboard
 from dex_sim.data_structures import MultiModelResults, SingleModelResults
 
 @pytest.fixture
@@ -48,7 +36,11 @@ def dummy_results(tmp_path):
         equity_short=eq1,
         slippage_cost=np.random.uniform(0, 10, (P, T)),
         ecp_position_path=np.random.uniform(-10, 10, (P, T)),
-        ecp_slippage_cost=np.random.uniform(0, 1, P)
+        ecp_slippage_cost=np.random.uniform(0, 1, P),
+        intent_accepted_normal=np.random.uniform(0, 10, (P, T)),
+        intent_accepted_reduce=np.random.uniform(0, 10, (P, T)),
+        intent_rejected=np.random.uniform(0, 1, (P, T)),
+        df_path=np.zeros((P, T)),
     )
     
     # Model 2: FXD
@@ -62,7 +54,13 @@ def dummy_results(tmp_path):
         price_paths=price2,
         lev_long=np.zeros((P, T)),
         lev_short=np.zeros((P, T)),
-        slippage_cost=np.random.uniform(0, 20, (P, T))
+        slippage_cost=np.random.uniform(0, 20, (P, T)),
+        intent_accepted_normal=np.random.uniform(0, 10, (P, T)),
+        intent_accepted_reduce=np.random.uniform(0, 10, (P, T)),
+        intent_rejected=np.random.uniform(0, 1, (P, T)),
+        df_path=np.zeros((P, T)),
+        ecp_position_path=np.zeros((P, T)),
+        ecp_slippage_cost=np.zeros(P)
     )
     
     multi_res = MultiModelResults(
@@ -78,46 +76,24 @@ def dummy_results(tmp_path):
     
     return multi_res, str(outdir)
 
-def test_plotting_functions_run_without_error(dummy_results):
+def test_generate_dashboard(dummy_results):
     multi_res, outdir = dummy_results
     
-    # Test comparisons
-    plot_df_survival_curve(multi_res, outdir)
-    assert os.path.exists(os.path.join(outdir, "solvency_survival_curve.png"))
+    # Test the new Plotly dashboard generator
+    path = generate_dashboard(multi_res, outdir)
     
-    plot_comparison_dashboard(multi_res, outdir)
-    assert os.path.exists(os.path.join(outdir, "comparison_df_boxplot.png"))
-    assert os.path.exists(os.path.join(outdir, "comparison_leverage_violin.png"))
-    
-    plot_efficiency_frontier(multi_res, outdir)
-    assert os.path.exists(os.path.join(outdir, "efficiency_frontier.png"))
-    
-    # Test per-model charts (AES)
-    aes_res = multi_res.models["AES"]
-    aes_dir = os.path.join(outdir, "AES")
-    os.makedirs(aes_dir, exist_ok=True)
-    
-    # New Dashboards
-    plot_system_dashboard(aes_res, aes_dir)
-    assert os.path.exists(os.path.join(aes_dir, "AES_system_dashboard.png"))
-    
-    plot_microstructure_explorer(aes_res, aes_dir)
-    # Risk diamond might not generate if no granular data, but function should run
-    
-    plot_symmetry_diagnostics(aes_res, aes_dir)
-    assert os.path.exists(os.path.join(aes_dir, "AES_symmetry_diagnostics.png"))
-    
-    # Legacy / Specific
-    plot_liquidation_heatmap(aes_res, aes_dir)
-    assert os.path.exists(os.path.join(aes_dir, "AES_liquidation_heatmap.png"))
-    
-    plot_worst_case_autopsy(aes_res, aes_dir)
-    assert os.path.exists(os.path.join(aes_dir, "AES_autopsy.png"))
+    assert os.path.exists(path)
+    assert path.endswith("dashboard.html")
+    assert os.path.getsize(path) > 0
 
-def test_plot_all_driver(dummy_results):
+def test_plot_all_legacy_wrapper(dummy_results):
+    # plot_all should just call generate_dashboard now
     multi_res, outdir = dummy_results
     plot_all(multi_res, outdir)
     
-    # Check if subdirectories created
-    assert os.path.exists(os.path.join(outdir, "AES"))
-    assert os.path.exists(os.path.join(outdir, "FXD"))
+    # It generates index.html inside outdir? 
+    # Looking at dashboard_export.py, default name is dashboard.html
+    # But plot_all docs said "Legacy entry point".
+    # Let's just check the file exists.
+    expected = os.path.join(outdir, "dashboard.html")
+    assert os.path.exists(expected)

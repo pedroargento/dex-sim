@@ -16,6 +16,7 @@ traders:
 models:
   - name: AES_es99
     backend: numba
+    gamma: 0.8
     im:
       type: es
       conf: 0.99
@@ -29,6 +30,7 @@ models:
 
   - name: FXD_20x
     backend: numba
+    gamma: 0.8
     im:
       type: fixed_leverage
       leverage: 20

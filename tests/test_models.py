@@ -13,6 +13,15 @@ def test_risk_model_composition():
     assert model.im == im_comp
     assert model.breaker == breaker
     assert model.liquidation == liq
+    assert model.gamma == 0.8  # Default
+
+def test_risk_model_gamma_config():
+    im_comp = ES_IM(conf=0.99, df=6)
+    breaker = Breaker()
+    liq = FullCloseOut()
+    
+    model = RiskModel("test_model", im_comp, breaker, liq, gamma=0.6)
+    assert model.gamma == 0.6
 
 def test_risk_model_initial_margin_delegation():
     im_comp = ES_IM(conf=0.99, df=6)

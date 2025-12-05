@@ -161,6 +161,7 @@ def build_model(mcfg: dict):
         breaker=build_breaker(mcfg.get("breaker", {})),
         liquidation=build_liquidation(mcfg.get("liquidation", {})),
         backend=mcfg.get("backend", "python"),
+        gamma=float(mcfg.get("gamma", 0.8)),
     )
 
 

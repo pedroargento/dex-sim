@@ -18,13 +18,15 @@ class RiskModel:
         im: InitialMargin, 
         breaker: Breaker, 
         liquidation: LiquidationStrategy,
-        backend: str = "python"
+        backend: str = "python",
+        gamma: float = 0.8
     ):
         self.name = name
         self.im = im
         self.breaker = breaker
         self.liquidation = liquidation
         self.backend = backend
+        self.gamma = gamma
 
     def initial_margin(self, notional: float, sigma_daily: float) -> float:
         """

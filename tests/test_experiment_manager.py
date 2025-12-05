@@ -34,6 +34,16 @@ def test_build_model_aes_style():
     
     assert isinstance(model.liquidation, PartialCloseOut)
     assert model.liquidation.slippage_factor == 0.005
+    assert model.gamma == 0.8 # Default
+
+def test_build_model_with_gamma():
+    cfg = {
+        "name": "GammaTest",
+        "im": {"type": "es"},
+        "gamma": 0.6
+    }
+    model = build_model(cfg)
+    assert model.gamma == 0.6
 
 def test_build_model_fxd_style():
     cfg = {

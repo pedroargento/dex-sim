@@ -74,13 +74,6 @@ class FullCloseOut(LiquidationStrategy):
     """
     slippage_factor: float = 0.001
 
-    def df_loss(self, vm_remaining: float, notional: float) -> float:
-        """
-        VM shortfall + slippage loss.
-        """
-        slippage_loss = self.slippage_factor * notional
-        return vm_remaining + slippage_loss
-
 
 @dataclass
 class PartialCloseOut(LiquidationStrategy):
@@ -91,23 +84,3 @@ class PartialCloseOut(LiquidationStrategy):
     
     # Placeholder for any specific partial logic if needed outside Numba
     # In this architecture, the Numba engine handles the 'how' based on type check or flag
-
-
-# ---------- Trader Entities ----------
-
-class Trader:
-    def __init__(self, equity: float, position: float = 0.0, start_step: int = 0):
-        self.equity = equity
-        self.position = position  # >0 long, <0 short
-        self.im_locked = 0.0
-        self.mm_required = 0.0
-        self.realized_pnl = 0.0
-        self.unrealized_pnl = 0.0
-        self.start_step = start_step
-
-    def reduces_exposure(self, delta_q: float) -> bool:
-        # True if trade moves position toward zero, not further away
-        # If position is 0, any trade increases exposure (returns False)
-        if self.position == 0.0:
-            return False
-        return (self.position > 0 and delta_q < 0) or (self.position < 0 and delta_q > 0)

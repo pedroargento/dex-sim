@@ -37,16 +37,6 @@ def test_breaker_margin_multiplier():
     assert breaker.margin_multiplier(2.0) == 2.0
     assert breaker.margin_multiplier(2.5) == 2.0
 
-def test_full_close_out_df_loss():
-    fco = FullCloseOut(slippage_factor=0.01)
-    notional = 1000.0
-    vm_remaining = 50.0
-    
-    # Loss = vm_remaining + slippage * notional
-    expected_loss = 50.0 + 0.01 * 1000.0
-    
-    assert fco.df_loss(vm_remaining, notional) == expected_loss
-
 def test_partial_close_out_init():
     pco = PartialCloseOut(slippage_factor=0.005)
     assert pco.slippage_factor == 0.005

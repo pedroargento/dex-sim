@@ -11,6 +11,7 @@ It is designed for speed, accuracy, and flexibility, allowing researchers and de
 - **Risk Modeling**: Supports fully modular component-based risk models (IM, Breaker, Liquidation).
 - **High-Performance Engine**: Utilizes a **Numba-accelerated** Monte Carlo engine to simulate thousands of price paths with GARCH-based volatility models, ensuring both speed and realism.
 - **Systemic Stress Testing**: Models complex dynamics like circuit breakers, dynamic margin adjustments, and default fund consumption.
+- **Interactive Visualization**: Automatically generates Plotly dashboards (`dashboard.html`, `drilldown.html`) for deep exploration of risk metrics and individual simulation paths.
 
 ## Features
 
@@ -28,13 +29,47 @@ It is designed for speed, accuracy, and flexibility, allowing researchers and de
     - `dex-sim plot`: Generate a full suite of plots for a given run.
     - `dex-sim compare`: Compare key metrics across multiple runs.
 
+## Quickstart
+
+### Installation
+
+Requires Python 3.10+ and `uv` (or pip).
+
+```bash
+uv sync
+# or
+pip install .
+```
+
+### Running Your First Simulation
+
+Run the included example configuration:
+
+```bash
+dex-sim run config/aes_vs_fxd_test.yaml
+```
+
+This command will:
+1.  Generate 1,500 market paths using GARCH(1,1) volatility parameters.
+2.  Simulate 2,000 traders (expanders/reducers) trading against a CCP.
+3.  Compare two models: `AES_es99` (Dynamic Risk) vs `FXD_20x` (Fixed Leverage).
+4.  Save results to `results/<timestamp>_aes_vs_fxd_test/`.
+5.  Generate a **Summary Report** (`summary.md`) and **Dashboards** (`dashboard.html`, `drilldown.html`).
+
 ## Risk Model Architecture (Component-Based)
 
 `dex-sim` uses a fully modular architecture. There is only one `RiskModel` class. A model is simply a composition of pluggable components defined in YAML:
 
-1.  **Initial Margin (IM)**: Determines the base margin requirement (e.g., `ES_IM` for dynamic risk, `FixedLeverageIM` for constant leverage).
+1.  **Initial Margin (IM)**: Determines the base margin requirement.
+    -   `type: es`: Expected Shortfall (Dynamic, volatility-based).
+    -   `type: fixed_leverage`: Constant leverage (e.g., 20x).
 2.  **Breaker**: A Finite State Machine that monitors systemic stress ($R_t$) and applies multipliers to the IM requirement.
-3.  **Liquidation**: Defines how positions are closed when margin is breached (e.g., `FullCloseOut`, `PartialCloseOut`).
+    -   Defines `soft` and `hard` thresholds for $R_t$.
+    -   Applies `multipliers` (e.g., `[1.0, 1.5, 2.0]`) corresponding to NORMAL, SOFT, and HARD states.
+3.  **Liquidation**: Defines how positions are closed when margin is breached.
+    -   `type: partial`: Closes only enough position to restore solvency (plus a buffer).
+    -   `type: full`: Closes the entire position immediately.
+    -   `slippage`: Configurable slippage factor for liquidation costs.
 
 This architecture allows you to simulate almost any exchange design without writing new Python code.
 
@@ -43,18 +78,15 @@ This architecture allows you to simulate almost any exchange design without writ
 Models are defined in the `models` list of your experiment configuration file.
 
 ```yaml
-# Global Trader Pool Configuration (Replaces old trader_arrival)
+# Global Trader Pool Configuration
 traders:
   count: 2000
-  initial_equity: 10000
-  initial_notional: symmetric # or value
+  initial_equity: 50000.0
   behaviors:
-    momentum: 0.30
-    mean_revert: 0.30
-    random: 0.10
-    hedger: 0.20
-    whale: 0.05
-    lp: 0.05
+    expand_fraction: 0.5  # Fraction of primary traders who expand positions
+    expand_rate: 0.01     # Rate at which they add to positions
+    reduce_fraction: 0.5  # Fraction of primary traders who reduce positions
+    reduce_rate: 0.005    # Rate at which they close positions
 
 models:
   - name: CCP_Numba_Accelerated
@@ -78,10 +110,6 @@ models:
 Uses dynamic Expected Shortfall margin, an active circuit breaker, and partial liquidation to mitigate cascades.
 
 ```yaml
-traders:
-  count: 5000
-  initial_equity: 50000
-
 models:
   - name: CCP_ES99
     backend: numba
@@ -115,179 +143,77 @@ models:
       slippage: 0.001
 ```
 
-### Example 3: Synthetic CFD Model
-Fixed leverage baseline but with a system-wide breaker to hike margins during volatility, plus partial liquidation.
-
-```yaml
-models:
-  - name: Synthetic_CFD
-    im:
-      type: fixed_leverage
-      leverage: 10
-    breaker:
-      soft: 0.5
-      hard: 0.9
-      multipliers: [1.0, 1.2, 1.4]
-    liquidation:
-      type: partial
-      slippage: 0.002
-```
-
-### Example 4: GMX-Style GLP Model (Delta-Neutral Liquidity)
-Simulates a liquidity pool model where traders have effectively infinite initial leverage (no IM check at open), and liquidation is purely based on equity depletion. No breaker logic.
-
-```yaml
-models:
-  - name: GMX_GLP
-    im:
-      type: fixed_leverage
-      leverage: 1000000     # Effectively no IM check
-    breaker:
-      soft: .inf
-      hard: .inf
-      multipliers: [1, 1, 1]
-    liquidation:
-      type: full
-      slippage: 0.001
-```
-
-### Example 5: DYDX-v4-Style Model
-Orderbook-like leverage with a mild breaker regime.
-
-```yaml
-models:
-  - name: DYDX_v4
-    im:
-      type: es
-      conf: 0.95
-    breaker:
-      soft: 0.8
-      hard: .inf
-      multipliers: [1.0, 1.05, 1.05]
-    liquidation:
-      type: full
-      slippage: 0.0005
-```
-
 ## Performance & Optimization
 
 `dex-sim` includes two simulation backends:
 
 1.  **Python (Reference)**: Flexible, object-oriented, useful for debugging and developing new logic.
-2.  **Numba (Accelerated)**: JIT-compiled, array-based engine. roughly **100x-500x faster**.
+2.  **Numba (Accelerated)**: JIT-compiled, array-based engine. Roughly **100x-500x faster**.
 
 To enable the optimized engine, add `backend: numba` to your model config.
 
-```yaml
-models:
-  - name: High_Performance_Run
-    backend: numba
-    # ... other config ...
+## 📑 Simulation Summary & Reporting
+
+`dex-sim` includes a comprehensive reporting system that automatically generates a quantitative summary of the simulation results.
+
+### Summary Report (`summary.md`)
+
+This Markdown file provides a standardized "scorecard" for comparing model performance, including:
+
+*   **Default Metrics**: Probability of Default (PoD), Max Loss, VaR 99.9%, Insolvency Loss.
+*   **Leverage Profile**: Mean/Max System Leverage, Time spent > 20x/50x leverage.
+*   **Liquidation Microstructure**: Total Event Count, Mean Fraction ($k$), Cascade Frequency (>5% paths/step).
+*   **Slippage Efficiency**: Slippage cost per $1 liquidated.
+*   **Systemic Stress (AES Only)**: Regime occupancy (% time in Soft/Hard breaker states), Mean Margin Multiplier.
+
+### Interactive Dashboards
+
+Two HTML dashboards are automatically generated:
+
+1.  **`dashboard.html`**: A high-level comparison view with small-multiples for:
+    -   **Risk Index**: Systemic risk ($R_t$) trends and breaker activation.
+    -   **Leverage**: P50/P95 leverage bands across all paths.
+    -   **Margin**: Initial Margin (IM) and Maintenance Margin (MM) bands.
+    -   **Liquidation**: Intensity and cost of liquidations.
+    -   **Trade Flow**: Accepted vs. Rejected trade volume.
+    -   **Exposure**: Total Open Interest (OI) and Net ECP Exposure.
+
+2.  **`drilldown.html`**: A forensic tool to explore individual simulation paths.
+    -   Select any specific Model and Path ID.
+    -   View synchronized plots of Price, $R_t$, Leverage, and Equity.
+    -   Inspect individual Liquidation events (marked with ❌).
+
+## Results Storage
+
+Simulation results are stored in the `results/<run_id>/` directory using **Zarr** for efficient array storage.
+
+**Directory Structure:**
+```
+results/20251205_123456_experiment/
+├── data.zarr/              # Zarr root group
+│   ├── log_returns         # MC Input: Log returns [P, T]
+│   ├── sigma_path          # MC Input: GARCH volatility [P, T]
+│   └── models/
+│       └── AES_es99/       # Per-model outputs
+│           ├── price_paths # [P, T]
+│           ├── lev_long    # [P, T]
+│           ├── rt          # [P, T] (Risk Index)
+│           ├── breaker_state
+│           ├── liquidation_fraction
+│           └── ...
+├── metadata.json           # Global simulation parameters
+├── summary.md              # Text report
+├── dashboard.html          # Interactive plots
+└── drilldown.html          # Path explorer
 ```
 
 ## Extending Models
 
-You can add new components by creating a Python class and registering it in `experiment_manager.py`.
+You can add new components by creating a Python class in `src/dex_sim/models/components.py` and registering it in `experiment_manager.py`.
 
-1.  **New IM Strategy**: Subclass `InitialMargin` in `models/components.py`. Implement `compute(notional, sigma)`.
+1.  **New IM Strategy**: Subclass `InitialMargin`. Implement `compute(notional, sigma)`.
 2.  **New Liquidation Logic**: Subclass `LiquidationStrategy`.
 3.  **Register**: Update the `build_im`, `build_breaker`, or `build_liquidation` functions in `src/dex_sim/experiment_manager.py` to handle your new `type` string.
-
-No subclassing of `RiskModel` is required.
-
-## Full End-to-End Example Config
-
-```yaml
-name: multi_risk_test
-paths: 10000
-initial_price: 1800
-notional: 400000000
-stress_factor: 1.0
-seed: 123
-garch_params: garch_params.json
-
-traders:
-  count: 2000
-  initial_equity: 10000
-  behaviors:
-    momentum: 0.5
-    mean_revert: 0.5
-
-models:
-  - name: CCP
-    backend: numba
-    im: { type: es, conf: 0.99 }
-    breaker: { soft: 0.4, hard: 0.7, multipliers: [1.0, 1.1, 1.25] }
-    liquidation: { type: partial }
-
-  - name: HL_20x
-    backend: numba
-    im: { type: fixed_leverage, leverage: 20 }
-    breaker: { soft: .inf, hard: .inf, multipliers: [1,1,1] }
-    liquidation: { type: full }
-```
-
-## 📑 Simulation Summary & Reporting
-
-`dex-sim` includes a comprehensive reporting system that automatically generates a quantitative summary of the simulation results. This summary is designed to provide risk committees, researchers, and developers with immediate, actionable metrics derived directly from the simulation data.
-
-### Purpose
-- Aggregates all numerical risk metrics derived from `SimulationResults`.
-- Provides a standardized "scorecard" for comparing model performance.
-- Saved automatically to: `results/<run_id>/summary.md`.
-
-### Manual Generation
-You can manually regenerate the summary for any existing run:
-
-```python
-from dex_sim.results_io import load_results
-from dex_sim.summary import generate_summary
-
-# Load results and generate summary
-results = load_results("results/20231129_my_experiment")
-generate_summary(results, "results/20231129_my_experiment")
-```
-
-### Documented Metrics
-
-The summary report includes the following data-derived metrics, grouped by category:
-
-#### 1) Default & Waterfall Metrics
-*   **Probability of Default (PoD)**: Percentage of paths where the Default Fund was utilized (`count(df > 0) / total_paths`).
-*   **DF Usage Distribution**: Mean, Median, 99th percentile (VaR), and Max DF usage across all paths.
-*   **Expected Shortfall (ES 99%)**: Average DF usage for the worst 1% of outcomes.
-*   **Insolvency Loss**: Total loss due to negative equity (bankruptcy).
-
-#### 2) Leverage Metrics
-*   **Mean System Leverage**: Average leverage across all paths and timesteps.
-*   **Max Peak Leverage**: The highest single leverage value observed in any path/timestep.
-*   **Time > 20x/50x**: Percentage of simulation time where leverage exceeded 20x or 50x.
-
-#### 3) Systemic Stress Metrics (Rₜ)
-*   **Mean/Max Rₜ**: Average and peak values of the systemic risk index.
-*   **Rₜ Volatility**: Standard deviation of the risk index.
-
-#### 4) Breaker Metrics
-*   **Regime Occupancy**: Percentage of time spent in `NORMAL`, `SOFT`, and `HARD` breaker states.
-*   **Mean Margin Multiplier**: The average multiplier applied to Initial Margin requirements.
-
-#### 5) Liquidation Metrics
-*   **Event Count**: Total number of liquidation events across all paths.
-*   **Mean Fraction ($k$)**: Average portion of the position closed during a liquidation event.
-*   **Cascade Frequency**: Percentage of timesteps where >5% of paths liquidated simultaneously.
-*   **Full vs. Partial**: Counts of full closeouts ($k=1.0$) vs. partial reductions ($k < 1.0$).
-
-#### 6) Slippage Metrics
-*   **Total Slippage Cost**: Sum of all slippage costs incurred by the system.
-*   **Cost Composition**: Breakdown of total losses into Insolvency (Gap Risk) vs. Slippage (Liquidity Risk).
-
-#### 7) Exposure & Notional Metrics
-*   **Survival Rate**: Percentage of paths that ended with a non-zero position.
-*   **Mean Final Notional**: Average remaining open interest at the end of the simulation.
-
-#### 8) Model Comparison Tables
-*   **Scorecard**: A side-by-side comparison table of key metrics (PoD, Max Loss, VaR, Avg Leverage) for all models in the experiment.
-
 
 ## Development Setup
 
@@ -296,22 +222,20 @@ The project follows a standard Python project structure.
 ```
 dex-sim/
 ├── config/                 # Experiment configuration files
-├── data/                   # Input data
 ├── results/                # Simulation outputs
 ├── src/
 │   └── dex_sim/
-│       ├── __init__.py
 │       ├── cli.py          # Command-line interface
-│       ├── engine.py       # Core Numba simulation engine
+│       ├── engine.py       # Orchestrator
+│       ├── engine_numba_columnar.py # Optimized kernel
+│       ├── experiment_manager.py # Config parser & runner
 │       ├── models/         # Risk model definitions
-│       ├── plotting.py     # Plotting functions
-│       └── ...
-├── tests/                  # Unit and integration tests
-├── pyproject.toml          # Project metadata and dependencies
+│       ├── plotting/       # Dashboard generation
+│       │   ├── dashboard.py
+│       │   ├── dashboard_export.py
+│       │   └── panels/     # Visualization components
+│       ├── results_io.py   # Zarr I/O
+│       └── summary.py      # Metric calculation
+├── pyproject.toml          # Dependencies
 └── README.md
 ```
-
-**Coding Standards**:
-- Code should be formatted with `ruff format`.
-- Linting is done with `ruff`.
-- Follow standard Python naming conventions (PEP 8).

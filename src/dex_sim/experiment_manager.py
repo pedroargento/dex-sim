@@ -184,6 +184,7 @@ def run_experiment_from_config(config_file: str, root: str = "results") -> str:
 
     # Simulation parameters
     num_paths = cfg.get("paths", 5000)
+    horizon = cfg.get("horizon", 7200)
     initial_price = cfg.get("initial_price", 4000.0)
     stress_factor = cfg.get("stress_factor", 1.0)
     seed = cfg.get("seed", 42)
@@ -202,6 +203,7 @@ def run_experiment_from_config(config_file: str, root: str = "results") -> str:
     print(f"Run ID: {rid}")
     print(f"Models: {[m.name for m in models]}")
     print(f"Paths: {num_paths}")
+    print(f"Horizon: {horizon} steps")
     print(f"Stress factor: {stress_factor}")
     print(f"Traders: {len(pool_data[0])} (Symmetric Pool)")
     print()
@@ -212,6 +214,7 @@ def run_experiment_from_config(config_file: str, root: str = "results") -> str:
         trader_pool=pool_data,
         trader_pool_config=cfg.get("traders", {}),
         num_paths=num_paths,
+        horizon=horizon,
         initial_price=initial_price,
         stress_factor=stress_factor,
         garch_params_file=garch_params,

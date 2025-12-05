@@ -69,6 +69,7 @@ def run_models(
     trader_pool: tuple,
     trader_pool_config: dict = None,  # New: pass config to extract rates
     num_paths: int = 5000,
+    horizon: int = 7200,
     initial_price: float = 4000.0,
     stress_factor: float = 1.0,
     garch_params_file: str = "garch_params.json",
@@ -80,6 +81,7 @@ def run_models(
     mc = MCReturnsGenerator(
         garch_params_file=garch_params_file,
         num_paths=num_paths,
+        horizon=horizon,
         stress_factor=stress_factor,
     )
 
